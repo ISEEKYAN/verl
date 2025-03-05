@@ -32,7 +32,7 @@ from verl.single_controller.base.decorator import register, Dispatch
 from verl import DataProto
 from verl.utils.fs import copy_to_local
 from verl.utils.debug import log_gpu_memory_usage
-from verl.utils.model import load_megatron_model_weights
+from verl.utils.model import load_megatron_model_weights, load_megatron_gptmodel_weights
 from verl.utils.megatron_utils import init_model_parallel_config
 from verl.utils.megatron_utils import offload_megatron_param_and_grad, load_megatron_param_and_grad
 from verl.utils import hf_tokenizer
@@ -479,12 +479,12 @@ class CriticWorker(MegatronWorker):
                                       optim_config,
                                       override_model_config,
                                       enable_gradient_checkpointing=False):
-        from megatron.core.models.gpt.gpt_model import ModelType
+        from megatron.core.models.gpt.gpt_model import ModelType, GPTModel
+        from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
         from verl.utils.model import print_model_size, update_model_config
         from verl.utils.megatron.optimizer import get_megatron_optimizer
-        from verl.utils.megatron_utils import get_model, init_megatron_optim_config, init_model_parallel_config
+        from verl.utils.megatron_utils import get_model, init_megatron_optim_config, init_model_parallel_config, convert_config
         from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-
         # Step 1: initialize the tokenizer
         local_path = copy_to_local(model_path)
         self.tokenizer = hf_tokenizer(local_path)
@@ -503,18 +503,51 @@ class CriticWorker(MegatronWorker):
         if self.rank == 0:
             print(f'Model config after override: {critic_model_config}')
 
+        tfconfig = convert_config(critic_model_config, megatron_config)
+        print(f'TF config: {tfconfig}')
+
         def megatron_critic_model_provider(pre_process, post_process):
-            from verl.utils.model import get_parallel_model_from_config
-            # TODO: support vpp here
-            # vpp_rank = mpu.get_virtual_pipeline_model_parallel_rank()  # this will be set inside get_model
-            # this_megatron_config = copy.deepcopy(megatron_config)
-            # this_megatron_config.virtual_pipeline_model_parallel_rank = vpp_rank
-            parallel_model = get_parallel_model_from_config(config=critic_model_config,
-                                                            megatron_config=megatron_config,
-                                                            pre_process=pre_process,
-                                                            post_process=post_process,
-                                                            share_embeddings_and_output_weights=False,
-                                                            value=True)
+            # from verl.utils.model import get_parallel_model_from_config
+            # # TODO: support vpp here
+            # # vpp_rank = mpu.get_virtual_pipeline_model_parallel_rank()  # this will be set inside get_model
+            # # this_megatron_config = copy.deepcopy(megatron_config)
+            # # this_megatron_config.virtual_pipeline_model_parallel_rank = vpp_rank
+            # parallel_model = get_parallel_model_from_config(config=critic_model_config,
+            #                                                 megatron_config=megatron_config,
+            #                                                 pre_process=pre_process,
+            #                                                 post_process=post_process,
+            #                                                 share_embeddings_and_output_weights=False,
+            #                                                 value=True)
+
+            use_te = True
+            transformer_layer_spec = get_gpt_decoder_block_spec(tfconfig, use_transformer_engine=use_te)
+
+            parallel_model = GPTModel(
+                config=tfconfig,
+                transformer_layer_spec=transformer_layer_spec,
+                vocab_size=critic_model_config.vocab_size,
+                max_sequence_length=critic_model_config.max_position_embeddings,
+                pre_process=pre_process,
+                post_process=post_process,
+                share_embeddings_and_output_weights=False,
+            )
+            if post_process:
+                # for critic and RM, we need to setup the output layer since it is a value model
+                from megatron.core import tensor_parallel
+                parallel_model.output_layer = tensor_parallel.ColumnParallelLinear(
+                    tfconfig.hidden_size,
+                    mpu.get_tensor_model_parallel_world_size(), # use only the first output
+                    config=tfconfig,
+                    init_method=tfconfig.init_method,
+                    bias=False,
+                    skip_bias_add=False,
+                    gather_output=not parallel_model.parallel_output,
+                    skip_weight_param_allocation=parallel_model.pre_process
+                    and parallel_model.share_embeddings_and_output_weights,
+                    embedding_activation_buffer=parallel_model.embedding_activation_buffer,
+                    grad_output_buffer=parallel_model.grad_output_buffer,
+                )
+                parallel_model.setup_embeddings_and_output_layer()
             parallel_model.cuda()
             return parallel_model
 
@@ -527,11 +560,11 @@ class CriticWorker(MegatronWorker):
         # critic_module = nn.ModuleList(critic_module)
 
         if self.config.load_weight:
-            load_megatron_model_weights(self.config,
-                                        critic_model_config,
-                                        critic_module,
-                                        params_dtype=megatron_config.params_dtype,
-                                        is_value_model=True)
+            load_megatron_gptmodel_weights(self.config,
+                                           critic_model_config,
+                                           critic_module,
+                                           params_dtype=megatron_config.params_dtype,
+                                           is_value_model=True)
         if self.rank == 0:
             print_model_size(critic_module[0])
 

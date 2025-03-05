@@ -33,6 +33,7 @@ from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.enums import ModelType
 from megatron.core import ModelParallelConfig
 from megatron.core.optimizer import OptimizerConfig
+from megatron.core.models.gpt.gpt_model import GPTModel
 
 
 def get_model_config(model):
@@ -103,11 +104,16 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         model_module.cuda(torch.cuda.current_device())
 
     # Fp16 conversion.
-    config: ModelParallelConfig = get_model_config(model[0])
-    config.fp8 = None
-    tfconfig: TransformerConfig = convert_config(model[0].config, config)
-    if config.fp16 or config.bf16:  # the ModelParallelConfig in GPTModel
-        model = [Float16Module(config, model_module) for model_module in model]
+    if not isinstance(model[0], GPTModel):
+        config: ModelParallelConfig = get_model_config(model[0])
+        config.fp8 = None
+        tfconfig: TransformerConfig = convert_config(model[0].config, config)
+        if config.fp16 or config.bf16:  # the ModelParallelConfig in GPTModel
+            model = [Float16Module(config, model_module) for model_module in model]
+    else:
+        tfconfig = model[0].config
+        if tfconfig.fp16 or tfconfig.bf16:
+            model = [Float16Module(tfconfig, model_module) for model_module in model]
 
     if wrap_with_ddp:
         ddp_models = []

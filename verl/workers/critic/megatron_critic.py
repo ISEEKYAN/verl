@@ -140,7 +140,7 @@ class MegatronPPOCritic(BasePPOCritic):
 
         def loss_func(output, data, meta_info):
             if forward_only:
-                return 1.0, {'vpreds': output.logits}
+                return 1.0, {'vpreds': output}
 
             responses = data['responses']
             attention_mask = data['attention_mask']
@@ -152,7 +152,7 @@ class MegatronPPOCritic(BasePPOCritic):
 
             cliprange_value = self.config.cliprange_value
 
-            vpreds = output.logits  # (bs, sequence_length)
+            vpreds = output  # (bs, sequence_length)
             vpreds = vpreds[:, -response_length - 1:-1]
 
             vf_loss, vf_clipfrac = core_algos.compute_value_loss(vpreds=vpreds,
@@ -173,7 +173,12 @@ class MegatronPPOCritic(BasePPOCritic):
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             position_ids = batch['position_ids']
+
             output = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
+            # gather output from all tp ranks
+            from megatron.core import tensor_parallel
+            output = tensor_parallel.gather_from_tensor_model_parallel_region(output)
+            output = output[..., 0]
             return output, partial(loss_func, data=batch, meta_info={})
 
         # batch should be a list of batches inside micro-batches

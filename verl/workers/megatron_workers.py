@@ -135,9 +135,10 @@ class ActorRolloutRefWorker(MegatronWorker):
                                override_model_config,
                                enable_gradient_checkpointing=False):
         from verl.utils.megatron.optimizer import get_megatron_optimizer
-        from megatron.core.models.gpt.gpt_model import ModelType
+        from megatron.core.models.gpt.gpt_model import ModelType, GPTModel
+        from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
         from verl.utils.model import print_model_size, update_model_config, get_generation_config
-        from verl.utils.megatron_utils import get_model, init_megatron_optim_config
+        from verl.utils.megatron_utils import get_model, init_megatron_optim_config, convert_config
         from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, GenerationConfig
 
         # Step 1: initialize the tokenizer
@@ -160,20 +161,36 @@ class ActorRolloutRefWorker(MegatronWorker):
         if self.rank == 0:
             print(f'Model config after override: {actor_model_config}')
 
+        tfconfig = convert_config(actor_model_config, megatron_config)
+        print(f'TF config: {tfconfig}')
+
         def megatron_actor_model_provider(pre_process, post_process):
-            from verl.utils.model import get_parallel_model_from_config
-            # vpp is not supported yet because it will hang for some reason. Need debugging
-            vpp_rank = mpu.get_virtual_pipeline_model_parallel_rank()  # this will be set inside get_model
-            # this_megatron_config = copy.deepcopy(megatron_config)
-            # this_megatron_config.virtual_pipeline_model_parallel_rank = vpp_rank
             share_embeddings_and_output_weights = getattr(actor_model_config, "tie_word_embeddings", False)
-            parallel_model = get_parallel_model_from_config(
-                config=actor_model_config,
-                megatron_config=megatron_config,
+            # from verl.utils.model import get_parallel_model_from_config
+            # # vpp is not supported yet because it will hang for some reason. Need debugging
+            # vpp_rank = mpu.get_virtual_pipeline_model_parallel_rank()  # this will be set inside get_model
+            # # this_megatron_config = copy.deepcopy(megatron_config)
+            # # this_megatron_config.virtual_pipeline_model_parallel_rank = vpp_rank
+            # parallel_model = get_parallel_model_from_config(
+            #     config=actor_model_config,
+            #     megatron_config=megatron_config,
+            #     pre_process=pre_process,
+            #     post_process=post_process,
+            #     share_embeddings_and_output_weights=share_embeddings_and_output_weights,
+            #     value=False)
+            use_te = True
+            transformer_layer_spec = get_gpt_decoder_block_spec(tfconfig, use_transformer_engine=use_te)
+
+            parallel_model = GPTModel(
+                config=tfconfig,
+                transformer_layer_spec=transformer_layer_spec,
+                vocab_size=actor_model_config.vocab_size,
+                max_sequence_length=actor_model_config.max_position_embeddings,
                 pre_process=pre_process,
                 post_process=post_process,
                 share_embeddings_and_output_weights=share_embeddings_and_output_weights,
-                value=False)
+            )
+
             parallel_model.cuda()
             return parallel_model
 
@@ -186,7 +203,7 @@ class ActorRolloutRefWorker(MegatronWorker):
             if isinstance(actor_module, nn.ModuleList):
                 actor_module = [actor_module[0]]
             if self.config.actor.load_weight:
-                load_megatron_model_weights(self.config,
+                load_megatron_gptmodel_weights(self.config,
                                             actor_model_config,
                                             actor_module,
                                             params_dtype=megatron_config.params_dtype,
@@ -205,7 +222,7 @@ class ActorRolloutRefWorker(MegatronWorker):
             if self.config.ref.load_weight:  # should align with the actor:
                 assert self.config.actor.load_weight == self.config.ref.load_weight
                 print(f'load ref weight start')
-                load_megatron_model_weights(self.config,
+                load_megatron_gptmodel_weights(self.config,
                                             actor_model_config,
                                             ref_module,
                                             params_dtype=megatron_config.params_dtype,
@@ -516,6 +533,8 @@ class CriticWorker(MegatronWorker):
         tfconfig.megatron_config = megatron_config
         tfconfig.hfconfig = critic_model_config
 
+        # from remote_pdb import RemotePdb
+        # RemotePdb('127.0.0.1', 4444+torch.distributed.get_rank()).set_trace()
         def megatron_critic_model_provider(pre_process, post_process):
             from verl.utils.model import get_parallel_gptmodel_from_config
             parallel_model = get_parallel_gptmodel_from_config(tfconfig,

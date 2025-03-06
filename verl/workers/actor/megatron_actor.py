@@ -31,9 +31,9 @@ import torch.distributed
 from megatron.core.optimizer import OptimizerConfig
 from megatron.core import parallel_state as mpu
 from megatron.core import ModelParallelConfig
-from verl.utils.megatron_utils import get_model_config
+# from verl.utils.megatron_utils import get_model_config
 from megatron.core.pipeline_parallel import get_forward_backward_func
-
+from megatron.core.utils import get_model_config
 from megatron.core.distributed import finalize_model_grads
 # from megatron.core.optimizer import DistributedOptimizer
 
@@ -163,7 +163,7 @@ class MegatronPPOActor(BasePPOActor):
         def compute_logprobs_fn(output, data):
             response = data['responses']
             response_length = response.size(1)
-            logits = output['logits']
+            logits = output
             logits = logits[:, -response_length - 1:-1].contiguous()
             log_probs = vocab_parallel_log_probs_from_logits(logits, response)
             return {'log_probs': log_probs}
@@ -263,7 +263,7 @@ class MegatronPPOActor(BasePPOActor):
         def loss_func(output, data, meta_info):
             if forward_only:
                 if post_process_fn is None:
-                    return 1.0, {'logits': output.logits}
+                    return 1.0, {'logits': output}
                 else:
                     return 1.0, post_process_fn(output, data)
 
@@ -278,7 +278,7 @@ class MegatronPPOActor(BasePPOActor):
             entropy_coeff = meta_info['entropy_coeff']
 
             # compute policy loss
-            logits = output.logits
+            logits = output
             logits = logits[:, -response_length - 1:-1].contiguous()
             logits_back = logits.clone()
             log_prob = vocab_parallel_log_probs_from_logits(logits, responses)

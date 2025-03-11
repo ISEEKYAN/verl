@@ -399,3 +399,47 @@ def pad_packed_inputs(unpad_tokens: torch.Tensor, cu_seqlens, max_seqlen_in_batc
         max_seqlen_in_batch = max(max_seqlen_in_batch, pad_size)
 
     return unpad_tokens, cu_seqlens, max_seqlen_in_batch
+
+
+def get_parallel_gptmodel_from_config(tfconfig,
+                                   hf_config,
+                                   pre_process=None,
+                                   post_process=None,
+                                   share_embeddings_and_output_weights=False,
+                                   value=False):
+    from megatron.core.models.gpt.gpt_model import GPTModel
+    from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
+    from megatron.core import parallel_state as mpu
+    from megatron.core import tensor_parallel
+    use_te = True
+    transformer_layer_spec = get_gpt_decoder_block_spec(tfconfig, use_transformer_engine=use_te)
+
+    parallel_model = GPTModel(
+        config=tfconfig,
+        transformer_layer_spec=transformer_layer_spec,
+        vocab_size=hf_config.vocab_size,
+        max_sequence_length=hf_config.max_position_embeddings,
+        pre_process=pre_process,
+        post_process=post_process,
+        share_embeddings_and_output_weights=share_embeddings_and_output_weights,
+        position_embedding_type='rope',
+        rotary_base = hf_config.rope_theta,
+        rope_scaling = hf_config.rope_scaling,
+    )
+    if post_process and value:
+        # for critic and RM, we need to setup the output layer since it is a value model
+        parallel_model.output_layer = tensor_parallel.ColumnParallelLinear(
+            tfconfig.hidden_size,
+            mpu.get_tensor_model_parallel_world_size(), # use only the first output
+            config=tfconfig,
+            init_method=tfconfig.init_method,
+            bias=False,
+            skip_bias_add=False,
+            gather_output=not parallel_model.parallel_output,
+            skip_weight_param_allocation=parallel_model.pre_process
+            and parallel_model.share_embeddings_and_output_weights,
+            embedding_activation_buffer=parallel_model.embedding_activation_buffer,
+            grad_output_buffer=parallel_model.grad_output_buffer,
+        )
+        parallel_model.setup_embeddings_and_output_layer()
+    return parallel_model

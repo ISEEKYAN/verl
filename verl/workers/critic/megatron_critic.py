@@ -173,12 +173,9 @@ class MegatronPPOCritic(BasePPOCritic):
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             position_ids = batch['position_ids']
+            from verl.models.llama.megatron.modeling_llama_megatron import gptmodel_forward
+            output = gptmodel_forward(model, input_ids, attention_mask, position_ids, sequence_parallel=self.megatron_config.sequence_parallel, pack_seqs=True)
 
-            output = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
-            # gather output from all tp ranks
-            from megatron.core import tensor_parallel
-            output = tensor_parallel.gather_from_tensor_model_parallel_region(output)
-            output = output[..., 0]
             return output, partial(loss_func, data=batch, meta_info={})
 
         # batch should be a list of batches inside micro-batches
@@ -212,7 +209,7 @@ class MegatronPPOCritic(BasePPOCritic):
     def update_critic(self, dataloader: Iterable[DataProto]):
         metrics = {}
 
-        for data in dataloader:
+        for i, data in enumerate(dataloader):
             # data = data.batch.to(self.critic_module.device)
             self.critic_optimizer.zero_grad()
             # use use_contiguous_buffers_in_local_ddp and no overlap_dp_param_comm
@@ -220,6 +217,18 @@ class MegatronPPOCritic(BasePPOCritic):
                 chunk.zero_grad_buffer()
 
             metric_micro_batch = self.forward_backward_batch(data)
+            self.critic_optimizer.prepare_grads()
+            
+            for group in self.critic_optimizer.param_groups:
+                for param in group['params']:
+                    if param.grad is not None:
+                        grad = param.grad.data
+                        nan_mask = torch.isnan(grad)
+                        if nan_mask.any():
+                            nan_count = nan_mask.sum().item()
+                            param_name = getattr(param, 'name', 'unnamed_parameter')
+                            print(f"NaN in grad {param_name}, {nan_count=}")
+                            grad.masked_fill_(nan_mask, 0.0)
 
             update_successful, grad_norm, num_zeros_in_grad = self.critic_optimizer.step()
 

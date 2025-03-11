@@ -180,10 +180,12 @@ def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerC
         virtual_pipeline_model_parallel_size=mpu.get_virtual_pipeline_model_parallel_world_size(),
         pipeline_dtype=dt,
         params_dtype=dt,
-        sequence_parallel=True,
+        sequence_parallel=mpu.get_tensor_model_parallel_world_size()>1,
         variable_seq_lengths=True,
         masked_softmax_fusion=True,
         moe_token_dispatcher_type="alltoall",
+        attention_dropout=hf_config.attention_dropout,
+        hidden_dropout=getattr(hf_config, 'hidden_dropout', 0.0),
         bf16=dt is torch.bfloat16)
     if torch.distributed.get_rank() == 0:
         print(f'tensor_parallel_size={transformer_config.tensor_model_parallel_size} \n \

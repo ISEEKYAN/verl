@@ -283,7 +283,7 @@ class ActorRolloutRefWorker(MegatronWorker):
         torch_dtype = torch.bfloat16
 
         megatron_config = OmegaConf.create({
-            'sequence_parallel': self.config.actor.megatron.get('sequence_parallel', True),
+            'sequence_parallel': self.config.actor.megatron.get('sequence_parallel', True) and mpu.get_tensor_model_parallel_world_size()>1,
             'param_dtype': PrecisionType.to_str(torch_dtype),
             'tensor_model_parallel_size': mpu.get_tensor_model_parallel_world_size(),
             'pipeline_model_parallel_rank': mpu.get_pipeline_model_parallel_rank(),
@@ -507,47 +507,8 @@ class CriticWorker(MegatronWorker):
         print(f'TF config: {tfconfig}')
 
         def megatron_critic_model_provider(pre_process, post_process):
-            # from verl.utils.model import get_parallel_model_from_config
-            # # TODO: support vpp here
-            # # vpp_rank = mpu.get_virtual_pipeline_model_parallel_rank()  # this will be set inside get_model
-            # # this_megatron_config = copy.deepcopy(megatron_config)
-            # # this_megatron_config.virtual_pipeline_model_parallel_rank = vpp_rank
-            # parallel_model = get_parallel_model_from_config(config=critic_model_config,
-            #                                                 megatron_config=megatron_config,
-            #                                                 pre_process=pre_process,
-            #                                                 post_process=post_process,
-            #                                                 share_embeddings_and_output_weights=False,
-            #                                                 value=True)
-
-            use_te = True
-            transformer_layer_spec = get_gpt_decoder_block_spec(tfconfig, use_transformer_engine=use_te)
-
-            parallel_model = GPTModel(
-                config=tfconfig,
-                transformer_layer_spec=transformer_layer_spec,
-                vocab_size=critic_model_config.vocab_size,
-                max_sequence_length=critic_model_config.max_position_embeddings,
-                pre_process=pre_process,
-                post_process=post_process,
-                share_embeddings_and_output_weights=False,
-            )
-            if post_process:
-                # for critic and RM, we need to setup the output layer since it is a value model
-                from megatron.core import tensor_parallel
-                parallel_model.output_layer = tensor_parallel.ColumnParallelLinear(
-                    tfconfig.hidden_size,
-                    mpu.get_tensor_model_parallel_world_size(), # use only the first output
-                    config=tfconfig,
-                    init_method=tfconfig.init_method,
-                    bias=False,
-                    skip_bias_add=False,
-                    gather_output=not parallel_model.parallel_output,
-                    skip_weight_param_allocation=parallel_model.pre_process
-                    and parallel_model.share_embeddings_and_output_weights,
-                    embedding_activation_buffer=parallel_model.embedding_activation_buffer,
-                    grad_output_buffer=parallel_model.grad_output_buffer,
-                )
-                parallel_model.setup_embeddings_and_output_layer()
+            from verl.utils.model import get_parallel_gptmodel_from_config
+            parallel_model = get_parallel_gptmodel_from_config(tfconfig, critic_model_config, pre_process, post_process, share_embeddings_and_output_weights=False, value=True)
             parallel_model.cuda()
             return parallel_model
 
@@ -588,7 +549,7 @@ class CriticWorker(MegatronWorker):
         torch_dtype = torch.bfloat16
 
         megatron_config = OmegaConf.create({
-            'sequence_parallel': self.config.megatron.get('sequence_parallel', True),
+            'sequence_parallel': self.config.megatron.get('sequence_parallel', True) and mpu.get_tensor_model_parallel_world_size()>1,
             'param_dtype': PrecisionType.to_str(torch_dtype),
             'tensor_model_parallel_size': mpu.get_tensor_model_parallel_world_size(),
             'pipeline_model_parallel_rank': mpu.get_pipeline_model_parallel_rank(),
@@ -759,7 +720,7 @@ class RewardModelWorker(MegatronWorker):
         torch_dtype = torch.bfloat16
 
         megatron_config = OmegaConf.create({
-            'sequence_parallel': self.config.megatron.get('sequence_parallel', True),
+            'sequence_parallel': self.config.megatron.get('sequence_parallel', True) and mpu.get_tensor_model_parallel_world_size()>1,
             'param_dtype': PrecisionType.to_str(torch_dtype),
             'tensor_model_parallel_size': mpu.get_tensor_model_parallel_world_size(),
             'pipeline_model_parallel_rank': mpu.get_pipeline_model_parallel_rank(),

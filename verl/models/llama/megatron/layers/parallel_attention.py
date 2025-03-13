@@ -416,3 +416,251 @@ class ParallelLlamaAttentionRmPad(ParallelLlamaAttention):
 
         attn_output_unpad = self.o_proj(attn_output_unpad)[0]
         return attn_output_unpad
+
+
+from megatron.core.extensions.transformer_engine import TransformerConfig, AttnMaskType, Tensor, PackedSeqParams
+import os
+
+
+class MyDotProductAttention(nn.Module):
+    """
+    A specialized core_attention that uses flash_attention computation to match precision
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        layer_number: int,
+        attn_mask_type: AttnMaskType,
+        attention_type: str,
+        attention_dropout: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
+        k_channels: Optional[int] = None,
+        v_channels: Optional[int] = None,
+        cp_comm_type: str = "p2p",
+    ):
+        super().__init__()
+        self.config = config
+        self.te_forward_mask_type = False
+        self.qkv_format: str = 'sbhd'
+
+        if self.config.apply_query_key_layer_scaling != bool(int(os.getenv('NVTE_APPLY_QK_LAYER_SCALING', '0'))):
+            raise ValueError(f"apply_query_key_layer_scaling is {self.config.apply_query_key_layer_scaling} "
+                             f"but environment variable NVTE_APPLY_QK_LAYER_SCALING is "
+                             f"{os.getenv('NVTE_APPLY_QK_LAYER_SCALING')}. Transformer Engine does not support "
+                             f"setting query key layer scaling via argument, so these two must match.")
+
+        extra_kwargs = {}
+        extra_kwargs["num_gqa_groups"] = self.config.num_query_groups
+        extra_kwargs["attention_type"] = attention_type
+        self.te_forward_mask_type = True
+
+        # This check is important as CP config can be disabled while having a valid CP group
+        # Example - Disabling CP for encoder while a valid CP group exists for decoder
+        if self.config.context_parallel_size > 1:
+            assert False, "Context parallelism is not supported"
+        self.attention_dropout = 0.0 if attention_dropout is None else attention_dropout
+        self.softmax_scale = softmax_scale
+
+    def forward(
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        attention_mask: Tensor,
+        attn_mask_type: AttnMaskType,
+        attention_bias: Tensor = None,
+        packed_seq_params: PackedSeqParams = None,
+    ):
+        """Forward."""
+        assert packed_seq_params is not None
+
+        def calc_max_seqlen_in_batch(seqlens_in_batch):
+            seqlens_in_batch = seqlens_in_batch[1:] - seqlens_in_batch[:-1]
+            return seqlens_in_batch.max().item()
+
+        core_attn_out = flash_attn_varlen_func(
+            query,
+            key,
+            value,
+            cu_seqlens_q=packed_seq_params.cu_seqlens_q,
+            cu_seqlens_k=packed_seq_params.cu_seqlens_kv,
+            max_seqlen_q=calc_max_seqlen_in_batch(packed_seq_params.cu_seqlens_q),
+            max_seqlen_k=calc_max_seqlen_in_batch(packed_seq_params.cu_seqlens_kv),
+            dropout_p=self.attention_dropout,
+            softmax_scale=self.softmax_scale,
+            causal=True,
+        )
+
+        return core_attn_out
+
+
+class MySelfAttention(ParallelLlamaAttention):
+    """Self-attention layer class
+
+    Self-attention layer takes input with size [s, b, h]
+    and returns output of the same size.
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        submodules,
+        layer_number: int,
+        attn_mask_type=AttnMaskType.padding,
+        cp_comm_type: str = None,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = config
+        self.layer_number = layer_number
+        megatron_config = config.megatron_config
+        config = config.hfconfig
+        self.config = config
+        self.megatron_config = megatron_config
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.num_key_value_heads = config.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.max_position_embeddings = config.max_position_embeddings
+        self.rope_theta = config.rope_theta
+
+        # assign values after tp
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+        assert self.num_heads % tp_size == 0, f'num_head must be divisible by tp_size. Got num_head={self.num_heads}, tp_size={tp_size}'
+        assert self.num_key_value_heads % tp_size == 0, \
+            f'num_key_value_heads must be divisible by tp_size. Got num_key_value_heads={self.num_key_value_heads}, tp_size={tp_size}'
+
+        self.num_heads_per_tp = self.num_heads // tp_size
+        self.num_key_value_heads_per_tp = self.num_key_value_heads // tp_size
+        self.hidden_size_per_tp = self.hidden_size // tp_size
+
+        if (self.head_dim * self.num_heads) != self.hidden_size:
+            raise ValueError(f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
+                             f" and `num_heads`: {self.num_heads}).")
+
+        column_kwargs = tp_utils.get_default_kwargs_for_column_parallel_linear()
+        row_kwargs = tp_utils.get_default_kwargs_for_row_parallel_linear()
+
+        if megatron_config is not None:
+            assert column_kwargs.get('config', False), 'must have ModelParallelConfig'
+            assert row_kwargs.get('config', False), 'must have ModelParallelConfig'
+            tp_utils.update_kwargs_with_config(column_kwargs, megatron_config)
+            tp_utils.update_kwargs_with_config(row_kwargs, megatron_config)
+
+        # [self.q_size, self.k_size, self.v_size]
+        self.linear_qkv = QKVParallelLinear(input_size=self.hidden_size,
+                                            num_heads=self.num_heads,
+                                            num_key_value_heads=self.num_key_value_heads,
+                                            head_dim=self.head_dim,
+                                            bias=config.attention_bias,
+                                            gather_output=False,
+                                            skip_bias_add=False,
+                                            **column_kwargs)
+
+        self.q_size = self.num_heads_per_tp * self.head_dim
+        self.k_size = self.num_key_value_heads_per_tp * self.head_dim
+        self.v_size = self.num_key_value_heads_per_tp * self.head_dim
+
+        self.linear_proj = tensor_parallel.RowParallelLinear(input_size=self.num_heads * self.head_dim,
+                                                             output_size=self.hidden_size,
+                                                             bias=config.attention_bias,
+                                                             input_is_parallel=True,
+                                                             skip_bias_add=False,
+                                                             **row_kwargs)
+
+        self._init_rope()
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask,
+        key_value_states=None,
+        inference_params=None,
+        rotary_pos_emb=None,
+        rotary_pos_cos=None,
+        rotary_pos_sin=None,
+        attention_bias=None,
+        packed_seq_params=None,
+        sequence_len_offset=None,
+    ):
+        # def forward(self,
+        #             hidden_states: torch.Tensor,
+        #             sequence_length: int = None,
+        #             cu_seqlens: torch.Tensor = None,
+        #             max_seqlen_in_batch: int = None):
+        cu_seqlens = packed_seq_params.cu_seqlens_q
+        max_seqlen_in_batch = packed_seq_params.max_seqlen_q
+        sequence_length = max_seqlen_in_batch
+        total_nnz, _, _ = hidden_states.size()  # This is the total_nnz padded after sequence parallel
+
+        if self.megatron_config.sequence_parallel:
+            total_nnz = total_nnz * mpu.get_tensor_model_parallel_world_size()
+
+        qkv = self.linear_qkv(hidden_states)[0]
+        query_states, key_states, value_states = qkv.split([self.q_size, self.k_size, self.v_size],
+                                                           dim=-1)  # (total_nnz, 1, hidden_size)
+
+        if self.megatron_config.sequence_parallel:
+            sequence_parallel_pad = total_nnz - cu_seqlens[-1]
+            total_nnz = cu_seqlens[-1]  # total_nnz before sp padding
+            query_states = query_states[:total_nnz]
+            key_states = key_states[:total_nnz]
+            value_states = value_states[:total_nnz]
+
+        # Flash attention requires the input to have the shape
+        # batch_size x seq_length x head_dime x hidden_dim
+        # therefore we just need to keep the original shape
+        query_states = query_states.view(total_nnz, self.num_heads_per_tp, self.head_dim)
+        key_states = key_states.view(total_nnz, self.num_key_value_heads_per_tp, self.head_dim)
+        value_states = value_states.view(total_nnz, self.num_key_value_heads_per_tp, self.head_dim)
+
+        cos, sin = self.rotary_emb(value_states, seq_len=sequence_length)
+        cos, sin = cos[:, :cos.shape[1] // 2], sin[:, :sin.shape[1] // 2]  # flash attn only needs half
+        query_states, key_states = apply_rotary_pos_emb_rmpad_flash(query_states,
+                                                                    key_states,
+                                                                    cos,
+                                                                    sin,
+                                                                    cu_seqlens=cu_seqlens,
+                                                                    max_seqlen=max_seqlen_in_batch)
+        # query_states, key_states = apply_rotary_pos_emb_rmpad(query_states, key_states, cos, sin, position_ids, indices,
+
+        # TODO: llama does not have dropout in the config??
+        # It is recommended to use dropout with FA according to the docs
+        # when training.
+        dropout_rate = 0.0  # if not self.training else self.attn_dropout
+
+        # In PEFT, usually we cast the layer norms in float32 for training stability reasons
+        # therefore the input hidden states gets silently casted in float32. Hence, we need
+        # cast them back in float16 just to be sure everything works as expected.
+        # This might slowdown training & inference so it is recommended to not cast the LayerNorms
+        # in fp32. (LlamaRMSNorm handles it correctly)
+        input_dtype = query_states.dtype
+        if input_dtype == torch.float32:
+            query_states = query_states.to(torch.float16)
+            key_states = key_states.to(torch.float16)
+            value_states = value_states.to(torch.float16)
+
+        attn_output_unpad = flash_attn_varlen_func(
+            query_states,
+            key_states,
+            value_states,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen_in_batch,
+            max_seqlen_k=max_seqlen_in_batch,
+            dropout_p=dropout_rate,
+            softmax_scale=None,
+            causal=True,
+        )
+
+        attn_output_unpad = attn_output_unpad.to(input_dtype)
+        attn_output_unpad = attn_output_unpad.reshape(total_nnz, 1, self.hidden_size_per_tp).contiguous()
+
+        # sequence parallel reduce_scatter is performed inside RowColumnParallel if enabled
+        # Here we need to repad
+        if self.megatron_config.sequence_parallel:
+            attn_output_unpad = F.pad(attn_output_unpad, pad=(0, 0, 0, 0, 0, sequence_parallel_pad))
+
+        attn_output_unpad = self.linear_proj(attn_output_unpad)[0]
+        return attn_output_unpad, None

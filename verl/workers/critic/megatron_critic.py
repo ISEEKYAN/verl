@@ -174,7 +174,14 @@ class MegatronPPOCritic(BasePPOCritic):
             attention_mask = batch['attention_mask']
             position_ids = batch['position_ids']
             from verl.models.llama.megatron.modeling_llama_megatron import gptmodel_forward
-            output = gptmodel_forward(model, input_ids, attention_mask, position_ids, sequence_parallel=self.megatron_config.sequence_parallel, pack_seqs=True)
+            from verl.utils.model import gptmodel_option
+
+            output = gptmodel_forward(model,
+                                      input_ids,
+                                      attention_mask,
+                                      position_ids,
+                                      sequence_parallel=self.megatron_config.sequence_parallel,
+                                      pack_seqs=gptmodel_option.seq_packing)
 
             return output, partial(loss_func, data=batch, meta_info={})
 
@@ -218,17 +225,6 @@ class MegatronPPOCritic(BasePPOCritic):
 
             metric_micro_batch = self.forward_backward_batch(data)
             self.critic_optimizer.prepare_grads()
-            
-            for group in self.critic_optimizer.param_groups:
-                for param in group['params']:
-                    if param.grad is not None:
-                        grad = param.grad.data
-                        nan_mask = torch.isnan(grad)
-                        if nan_mask.any():
-                            nan_count = nan_mask.sum().item()
-                            param_name = getattr(param, 'name', 'unnamed_parameter')
-                            print(f"NaN in grad {param_name}, {nan_count=}")
-                            grad.masked_fill_(nan_mask, 0.0)
 
             update_successful, grad_norm, num_zeros_in_grad = self.critic_optimizer.step()
 

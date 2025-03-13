@@ -401,17 +401,54 @@ def pad_packed_inputs(unpad_tokens: torch.Tensor, cu_seqlens, max_seqlen_in_batc
     return unpad_tokens, cu_seqlens, max_seqlen_in_batch
 
 
+from dataclasses import dataclass
+
+
+@dataclass
+class GPTModelOption:
+    my_self_attention: bool = False
+    my_core_attention: bool = False
+    my_mlp: bool = False
+    my_rmsnorm: bool = False
+    seperate_rms_norm_attention: bool = False
+    seperate_rms_norm_mlp: bool = False
+    seq_packing: bool = False
+
+    def validate(self):
+        if self.seq_packing:
+            assert self.my_self_attention, 'seq_packing requires my_self_attention, or NaN appears in grad'
+        if self.my_self_attention:
+            assert self.seperate_rms_norm_attention
+            assert self.seq_packing
+        if self.my_mlp:
+            assert self.seperate_rms_norm_mlp
+        # pure GPTModel is used when all the above are False
+
+import os
+gptmodel_option = GPTModelOption(
+my_self_attention = 'my_self_attention' in os.environ and bool(eval(os.environ['my_self_attention'])),
+my_core_attention = 'my_core_attention' in os.environ and bool(eval(os.environ['my_core_attention'])),
+my_mlp = 'my_mlp' in os.environ and bool(eval(os.environ['my_mlp'])),
+my_rmsnorm = 'my_rmsnorm' in os.environ and bool(eval(os.environ['my_rmsnorm'])),
+seperate_rms_norm_attention = 'seperate_rms_norm_attention' in os.environ and bool(eval(os.environ['seperate_rms_norm_attention'])),
+seperate_rms_norm_mlp = 'seperate_rms_norm_mlp' in os.environ and bool(eval(os.environ['seperate_rms_norm_mlp'])),
+seq_packing = 'seq_packing' in os.environ and bool(eval(os.environ['seq_packing'])),
+)
+print(gptmodel_option)
 def get_parallel_gptmodel_from_config(tfconfig,
-                                   hf_config,
-                                   pre_process=None,
-                                   post_process=None,
-                                   share_embeddings_and_output_weights=False,
-                                   value=False):
+                                      hf_config,
+                                      pre_process=None,
+                                      post_process=None,
+                                      share_embeddings_and_output_weights=False,
+                                      value=False):
     from megatron.core.models.gpt.gpt_model import GPTModel
-    from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
+    # from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
+    from verl.utils.megatron.gpt_layer_specs import get_gpt_decoder_block_spec
     from megatron.core import parallel_state as mpu
     from megatron.core import tensor_parallel
     use_te = True
+    assert tfconfig.normalization == "RMSNorm", 'only RMSNorm is supported for now'
+    gptmodel_option.validate()
     transformer_layer_spec = get_gpt_decoder_block_spec(tfconfig, use_transformer_engine=use_te)
 
     parallel_model = GPTModel(
@@ -423,23 +460,14 @@ def get_parallel_gptmodel_from_config(tfconfig,
         post_process=post_process,
         share_embeddings_and_output_weights=share_embeddings_and_output_weights,
         position_embedding_type='rope',
-        rotary_base = hf_config.rope_theta,
-        rope_scaling = hf_config.rope_scaling,
+        rotary_base=hf_config.rope_theta,
+        rope_scaling=hf_config.rope_scaling,
     )
+    # # for layer in parallel_model.decoder.layers: layer.self_attention.core_attention.flash_attention.softmax_scale = None
     if post_process and value:
-        # for critic and RM, we need to setup the output layer since it is a value model
-        parallel_model.output_layer = tensor_parallel.ColumnParallelLinear(
-            tfconfig.hidden_size,
-            mpu.get_tensor_model_parallel_world_size(), # use only the first output
-            config=tfconfig,
-            init_method=tfconfig.init_method,
-            bias=False,
-            skip_bias_add=False,
-            gather_output=not parallel_model.parallel_output,
-            skip_weight_param_allocation=parallel_model.pre_process
-            and parallel_model.share_embeddings_and_output_weights,
-            embedding_activation_buffer=parallel_model.embedding_activation_buffer,
-            grad_output_buffer=parallel_model.grad_output_buffer,
-        )
-        parallel_model.setup_embeddings_and_output_layer()
+        from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
+        parallel_model.output_layer = LinearForLastLayer(input_size=tfconfig.hidden_size,
+                                                         output_size=1,
+                                                         config=tfconfig)
+    print(gptmodel_option,parallel_model)
     return parallel_model

@@ -72,3 +72,66 @@ class ParallelLlamaMLP(nn.Module):
         gate_up = self.gate_up_proj(x)[0]
         gate, up = gate_up.split(self.gate_size, dim=-1)
         return self.down_proj(self.act_fn(gate) * up)[0]
+
+
+from megatron.core import tensor_parallel
+from megatron.core.transformer.transformer_config import TransformerConfig
+
+
+class MyMLP(nn.Module):
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        submodules,
+        is_expert: bool = False,
+        input_size: int = None,
+    ):
+        super().__init__()
+        self.config: TransformerConfig = config
+        self.input_size = input_size if input_size != None else self.config.hidden_size
+        ffn_hidden_size = self.config.ffn_hidden_size
+        if self.config.gated_linear_unit:
+            ffn_hidden_size *= 2
+
+        self.activation_func = self.config.activation_func
+
+        self.config = config
+        self.hidden_size = config.hidden_size
+        # The weight is only [hidden_size, intermediate_size // model_parallel_world_size]
+
+        self.intermediate_size = self.config.ffn_hidden_size
+        column_kwargs = tp_utils.get_default_kwargs_for_column_parallel_linear()
+        row_kwargs = tp_utils.get_default_kwargs_for_row_parallel_linear()
+
+        if config.megatron_config is not None:
+            assert column_kwargs.get('config', False), 'must have ModelParallelConfig'
+            assert row_kwargs.get('config', False), 'must have ModelParallelConfig'
+            tp_utils.update_kwargs_with_config(row_kwargs, config.megatron_config)
+            tp_utils.update_kwargs_with_config(column_kwargs, config.megatron_config)
+
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+
+        self.linear_fc1 = MergedColumnParallelLinear(
+            input_size=self.hidden_size,
+            gate_ouput_size=self.intermediate_size,
+            up_output_size=self.intermediate_size,
+            bias=False,
+            gather_output=False,
+            skip_bias_add=False,
+            **column_kwargs,
+        )
+        self.gate_size = self.intermediate_size // tp_size
+
+        self.linear_fc2 = tensor_parallel.RowParallelLinear(input_size=self.intermediate_size,
+                                                            output_size=self.hidden_size,
+                                                            bias=False,
+                                                            input_is_parallel=True,
+                                                            skip_bias_add=False,
+                                                            **row_kwargs)
+        self.act_fn = self.activation_func
+
+    def forward(self, hidden_states):
+        gate_up = self.linear_fc1(hidden_states)[0]
+        gate, up = gate_up.split(self.gate_size, dim=-1)
+        return self.linear_fc2(self.act_fn(gate) * up)[0], None

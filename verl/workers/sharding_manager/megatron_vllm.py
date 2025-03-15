@@ -290,7 +290,9 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         definition so that it is model-agnostic. If the model doesn't implement this function, 
         we can throw an error to force user disable TP HybridEngine.
         """
-
+        from verl.utils.model import gptmodel_option
+        if 'layer_norm_weight' in name:
+            return infer_params
         if any([x in name for x in self.layer_name_mapping.get("qkv_layer_name")]):
             # if the tensor is qkv, for each param on tp, split into q, k, v
             # concat q, k, v separately.
@@ -302,11 +304,20 @@ class MegatronVLLMShardingManager(BaseShardingManager):
             assert infer_params[0].shape[0] % (num_q_per_kv + 2) == 0
             kv_size_per_tp = infer_params[0].shape[0] // (num_q_per_kv + 2)
             split_size = [kv_size_per_tp * num_q_per_kv, kv_size_per_tp, kv_size_per_tp]
-            for infer_param in infer_params:
-                q, k, v = infer_param.split(split_size)
-                q_lst.append(q)
-                k_lst.append(k)
-                v_lst.append(v)
+            if gptmodel_option.my_self_attention:
+                for infer_param in infer_params:
+                    q, k, v = infer_param.split(split_size)
+                    q_lst.append(q)
+                    k_lst.append(k)
+                    v_lst.append(v)
+            else:
+                for infer_param in infer_params:
+                    for chunk in infer_param.chunk(kv_size_per_tp):
+                        q,k,v = chunk.split([ num_q_per_kv, 1, 1])
+                        q_lst.append(q)
+                        k_lst.append(k)
+                        v_lst.append(v)
+
             q = torch.cat(q_lst, dim=0)
             k = torch.cat(k_lst, dim=0)
             v = torch.cat(v_lst, dim=0)

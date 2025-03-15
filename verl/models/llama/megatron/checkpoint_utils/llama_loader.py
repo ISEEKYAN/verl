@@ -883,7 +883,9 @@ def load_state_dict_to_megatron_gptmodel_llama(state_dict, wrapped_models, confi
 def linear_qkv_convert_from_hf_to_te(param, num_query_groups, num_attention_heads, head_dim):
     from megatron.core import mpu
     tp_size = mpu.get_tensor_model_parallel_world_size()
-    num_query_groups_per_partition = num_query_groups // tp_size
+    if tp_size!=1:
+        return
+    num_query_groups_per_partition = num_query_groups
     if num_query_groups_per_partition==1:
         return
 

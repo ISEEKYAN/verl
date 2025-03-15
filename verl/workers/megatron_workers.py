@@ -235,7 +235,7 @@ class ActorRolloutRefWorker(MegatronWorker):
             # NOTE(sgm): If the QKV and gate_up projection layer are concate together in actor,
             # we will reorganize their weight format when resharding from actor to rollout.
             layer_name_mapping = {
-                "qkv_layer_name": [self.config.rollout.layer_name_map.get("qkv_layer_name", "qkv"), "qkv"],
+                "qkv_layer_name": [self.config.rollout.layer_name_map.get("qkv_layer_name", "qkv"), "self_attention.linear_qkv.weight"],
                 "gate_proj_layer_name":[
                     self.config.rollout.layer_name_map.get("gate_proj_layer_name", "linear_fc1.weight"),
                     "linear_fc1.weight"

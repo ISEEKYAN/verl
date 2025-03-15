@@ -114,8 +114,8 @@ def llama_megatron_core_te_weight_loader(actor_weights: Dict, vllm_model: nn.Mod
     if gptmodel_option.seperate_rms_norm_attention:
         params_mapping += [("input_layernorm", "input_layernorm")]
     else:
-        params_mapping += [("self_attention.linear_qkv.layer_norm_weight", "input_layernorm.weight"),
-        ("self_attention.linear_qkv.layer_norm_bias", "input_layernorm.bias")]
+        params_mapping = [("self_attention.linear_qkv.layer_norm_weight", "input_layernorm.weight"),
+        ("self_attention.linear_qkv.layer_norm_bias", "input_layernorm.bias")]+params_mapping
 
     # NOTE(shengguangming): the megatron llama may have this prefix
     params_dict = dict(vllm_model.named_parameters())

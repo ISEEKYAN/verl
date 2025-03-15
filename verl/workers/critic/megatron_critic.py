@@ -183,6 +183,7 @@ class MegatronPPOCritic(BasePPOCritic):
                                       sequence_parallel=self.megatron_config.sequence_parallel,
                                       pack_seqs=gptmodel_option.seq_packing)
 
+            output = output[..., 0]
             return output, partial(loss_func, data=batch, meta_info={})
 
         # batch should be a list of batches inside micro-batches

@@ -688,13 +688,12 @@ def gptmodel_forward(model, input_ids, attention_mask, position_ids, sequence_pa
                        attention_mask=None,
                        position_ids=position_ids,
                        packed_seq_params=packed_seq_params)
-
         output = torch.squeeze(output, dim=0)  # (1,seq,1)->(seq,1)
 
         if sequence_parallel and pad_size > 0:
             output = output[:cu_seqlens[-1]]
 
-        output = pad_input(output, indices, batch_size, seqlen=sequence_length)[..., 0]
+        output = pad_input(output, indices, batch_size, seqlen=sequence_length)
     else:
         # output = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
         batch_size, sequence_length = input_ids.shape

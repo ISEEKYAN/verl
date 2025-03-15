@@ -97,12 +97,10 @@ def qwen2_megatron_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -> 
 
 
 def llama_megatron_core_te_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -> nn.Module:
+    from verl.utils.model import gptmodel_option
     params_mapping = [
         # (megatron core gpt model name, vllm model name)
         ("embedding.word_embeddings", "model.embed_tokens"),
-        ("self_attention.linear_qkv.layer_norm_weight", "input_layernorm.weight"),
-        ("self_attention.linear_qkv.layer_norm_bias", "input_layernorm.bias"),
-        ("self_attention.linear_qkv", "self_attn.qkv_proj"),
         ("self_attention.linear_qkv", "self_attn.qkv_proj"),
         ("self_attention.linear_proj", "self_attn.o_proj"),
         ("pre_mlp_layernorm", "post_attention_layernorm"),
@@ -113,10 +111,16 @@ def llama_megatron_core_te_weight_loader(actor_weights: Dict, vllm_model: nn.Mod
         ("decoder.final_layernorm", "model.norm"),
         ("output_layer", "lm_head"),
     ]
+    if gptmodel_option.seperate_rms_norm_attention:
+        params_mapping += [("input_layernorm", "input_layernorm")]
+    else:
+        params_mapping += [("self_attention.linear_qkv.layer_norm_weight", "input_layernorm.weight"),
+        ("self_attention.linear_qkv.layer_norm_bias", "input_layernorm.bias")]
+
     # NOTE(shengguangming): the megatron llama may have this prefix
     params_dict = dict(vllm_model.named_parameters())
-    for name, loaded_weight in actor_weights.items():
-        name = _replace_name(name, params_mapping)
+    for original_name, loaded_weight in actor_weights.items():
+        name = _replace_name(original_name, params_mapping)
         if not name or name.endswith(".bias") and name not in params_dict:
             continue
         if "rotary_emb.inv_freq" in name:
@@ -125,6 +129,13 @@ def llama_megatron_core_te_weight_loader(actor_weights: Dict, vllm_model: nn.Mod
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
+        if 'self_attn.qkv_proj' in name:
+            if not gptmodel_option.my_self_attention:
+                # use TE linear qkv, need to transpose the weight,
+                # in TE, QKV is not directly concat of qkv, but qkv by groups
+                from verl.models.llama.megatron.checkpoint_utils.llama_loader import linear_qkv_convert_from_hf_to_te
+                linear_qkv_convert_from_hf_to_te(param, vllm_model.config.num_key_value_heads, vllm_model.config.num_attention_heads, vllm_model.config.head_dim)
+
 
 
 def _replace_name(megatron_name, name_mapping):

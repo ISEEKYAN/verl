@@ -304,7 +304,16 @@ class MegatronPPOActor(BasePPOActor):
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             position_ids = batch['position_ids']
-            output = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
+
+            from verl.models.llama.megatron.modeling_llama_megatron import gptmodel_forward
+            from verl.utils.model import gptmodel_option
+
+            output = gptmodel_forward(model,
+                                      input_ids,
+                                      attention_mask,
+                                      position_ids,
+                                      sequence_parallel=self.megatron_config.sequence_parallel,
+                                      pack_seqs=gptmodel_option.seq_packing)
             if forward_only:
                 meta_info = None
             else:

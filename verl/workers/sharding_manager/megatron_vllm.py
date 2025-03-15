@@ -291,7 +291,7 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         we can throw an error to force user disable TP HybridEngine.
         """
 
-        if self.layer_name_mapping.get("qkv_layer_name") in name:
+        if any([x in name for x in self.layer_name_mapping.get("qkv_layer_name")]):
             # if the tensor is qkv, for each param on tp, split into q, k, v
             # concat q, k, v separately.
             q_lst = []
@@ -313,7 +313,7 @@ class MegatronVLLMShardingManager(BaseShardingManager):
 
             infer_params = torch.cat((q, k, v), dim=0)
 
-        elif self.layer_name_mapping.get("gate_proj_layer_name") in name:
+        elif any([x in name for x in self.layer_name_mapping.get("gate_proj_layer_name")]):
             # if the tensor is gate and proj
             gate_lst = []
             up_lst = []

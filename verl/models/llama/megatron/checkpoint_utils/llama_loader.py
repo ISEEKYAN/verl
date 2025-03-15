@@ -879,3 +879,25 @@ def load_state_dict_to_megatron_gptmodel_llama(state_dict, wrapped_models, confi
     pass
     torch.cuda.empty_cache()
     print_rank_0(f"loading megatron ckpt done, time elapsed {time.time() - start_time}s")
+
+def linear_qkv_convert_from_hf_to_te(param, num_query_groups, num_attention_heads, head_dim):
+    from megatron.core import mpu
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    num_query_groups_per_partition = num_query_groups // tp_size
+    if num_query_groups_per_partition==1:
+        return
+
+    q_part = param[:num_attention_heads * head_dim]
+    kv_part = param[num_attention_heads * head_dim:]
+    k_part,v_part = kv_part.chunk(2, dim=0)
+    assert k_part.shape[0] == num_query_groups * head_dim    
+    q_part_per_head = torch.chunk(q_part, num_query_groups_per_partition, dim=0)
+    k_part_per_head = torch.chunk(k_part, num_query_groups_per_partition, dim=0)
+    v_part_per_head = torch.chunk(v_part, num_query_groups_per_partition, dim=0)
+    total_size_per_head = param.data.numel() // num_query_groups_per_partition
+    new_weight_qkv = torch.empty_like(param.data, device=param.device)
+    for j in range(num_query_groups_per_partition):
+        new_weight_qkv[j * total_size_per_head:(j + 1) * total_size_per_head].copy_(
+            torch.cat([q_part_per_head[j], k_part_per_head[j], v_part_per_head[j]], dim=0))
+    param.data = new_weight_qkv
+    return

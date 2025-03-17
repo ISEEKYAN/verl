@@ -696,7 +696,53 @@ def gptmodel_forward(model, input_ids, attention_mask, position_ids, sequence_pa
 
         output = pad_input(output, indices, batch_size, seqlen=sequence_length)[..., 0]
     else:
-        output = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
+        # output = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
+        batch_size, sequence_length = input_ids.shape
+        new_input_ids, new_attention_mask, new_position_ids = remove_left_padding(input_ids, attention_mask, position_ids,sequence_parallel)
+        output = model(input_ids=new_input_ids, attention_mask=new_attention_mask, position_ids=new_position_ids)
+        output = recover_left_padding(output, new_attention_mask, attention_mask, sequence_length)
 
-        output = output[..., 0]
     return output
+
+def remove_left_padding(input_ids: torch.Tensor, attention_mask: torch.Tensor, position_ids: torch.Tensor,sequence_parallel: bool=False):
+
+    """
+    Remove left padding from input_ids, attention_mask and position_ids
+    return new_input_ids, new_attention_mask, new_position_ids
+    """
+    assert attention_mask.ndim == 2
+    assert position_ids.ndim == 2
+    
+    batch_size = input_ids.shape[0]
+    shape = list(input_ids.shape) # batch_size, seq_len,...
+    seq_lens = attention_mask.sum(dim=1)
+    seq_len = seq_lens.max().item()
+    if sequence_parallel: 
+        from megatron.core import parallel_state as mpu
+        sp_world_size = mpu.get_tensor_model_parallel_world_size()
+        pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
+        seq_len = seq_len + pad_size
+    shape[1] = seq_len
+    
+    new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
+    new_attention_mask = torch.zeros(dtype=attention_mask.dtype, device=attention_mask.device, size=(batch_size, seq_len))
+    new_position_ids = torch.zeros(dtype=position_ids.dtype, device=position_ids.device, size=(batch_size, seq_len))
+    for i in range(batch_size):
+        new_input_ids[i, :seq_lens[i]] = input_ids[i, attention_mask[i]]
+        new_attention_mask[i, :seq_lens[i]] = attention_mask[i, attention_mask[i]]
+        new_position_ids[i, :seq_lens[i]] = position_ids[i, attention_mask[i]]
+    return new_input_ids, new_attention_mask, new_position_ids
+
+def recover_left_padding(result, attention_mask: torch.Tensor, original_attention_mask: torch.Tensor, origin_seqlen: int):
+    """
+    Recover left padding from result
+    return result
+    """
+    shape = list(result.shape)
+    batch_size = shape[0]
+    shape[1] = origin_seqlen
+    new_result = torch.zeros(dtype=result.dtype, device=result.device, size=shape)
+    for i in range(batch_size):
+        new_result[i, original_attention_mask[i]] = result[i, attention_mask[i]]
+    return new_result
+

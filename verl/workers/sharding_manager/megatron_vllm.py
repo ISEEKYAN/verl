@@ -312,8 +312,10 @@ class MegatronVLLMShardingManager(BaseShardingManager):
                     v_lst.append(v)
             else:
                 for infer_param in infer_params:
-                    for chunk in infer_param.chunk(kv_size_per_tp):
-                        q,k,v = chunk.split([ num_q_per_kv, 1, 1])
+                    num_query_groups_per_partition = model_config.num_key_value_heads//mpu.get_tensor_model_parallel_world_size()
+                    for chunk in infer_param.chunk(num_query_groups_per_partition):
+                        split_size = [kv_size_per_tp * num_q_per_kv//num_query_groups_per_partition, kv_size_per_tp//num_query_groups_per_partition, kv_size_per_tp//num_query_groups_per_partition]
+                        q,k,v = chunk.split(split_size)
                         q_lst.append(q)
                         k_lst.append(k)
                         v_lst.append(v)

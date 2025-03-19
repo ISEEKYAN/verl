@@ -162,6 +162,11 @@ def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerC
     print(f'megatron config {megatron_config}')
     dt = PrecisionType.to_dtype(megatron_config.params_dtype)
     print(f'pipeline_dtype=megatron_config {dt}')
+
+    if "Qwen2ForCausalLM" in hf_config.architectures:
+        qkv_bias = True
+    else:
+        qkv_bias = getattr(hf_config, 'attention_bias', False)
     transformer_config = TransformerConfig(
         num_layers=hf_config.num_hidden_layers,
         hidden_size=hf_config.hidden_size,
@@ -176,6 +181,7 @@ def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerC
         use_cpu_initialization=True,
         apply_residual_connection_post_layernorm=False,  # check what's this mean
         add_bias_linear=False,
+        add_qkv_bias=qkv_bias,
         tensor_model_parallel_size=mpu.get_tensor_model_parallel_world_size(),
         pipeline_model_parallel_size=mpu.get_pipeline_model_parallel_world_size(),
         virtual_pipeline_model_parallel_size=mpu.get_virtual_pipeline_model_parallel_world_size(),

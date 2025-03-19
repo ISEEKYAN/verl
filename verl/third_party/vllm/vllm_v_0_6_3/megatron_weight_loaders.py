@@ -96,7 +96,7 @@ def qwen2_megatron_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -> 
         weight_loader(param, loaded_weight)
 
 
-def llama_megatron_core_te_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -> nn.Module:
+def megatron_core_te_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -> nn.Module:
     from verl.utils.model import gptmodel_option
     params_mapping = [
         # (megatron core gpt model name, vllm model name)
@@ -129,12 +129,12 @@ def llama_megatron_core_te_weight_loader(actor_weights: Dict, vllm_model: nn.Mod
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
-        if 'self_attn.qkv_proj' in name:
+        if 'self_attn.qkv_proj' in name and ".layer_norm_" not in name:
             if not gptmodel_option.my_self_attention:
                 # use TE linear qkv, need to transpose the weight,
                 # in TE, QKV is not directly concat of qkv, but qkv by groups
                 from verl.models.llama.megatron.checkpoint_utils.llama_loader import linear_qkv_convert_from_hf_to_te
-                linear_qkv_convert_from_hf_to_te(param, vllm_model.config.num_key_value_heads, vllm_model.config.num_attention_heads, vllm_model.config.head_dim)
+                linear_qkv_convert_from_hf_to_te(param, vllm_model.config.num_key_value_heads, vllm_model.config.num_attention_heads)
 
 
 
@@ -222,10 +222,10 @@ __LAYER_WEIGHT_MEGATRON_LOADER_REGISTRY__ = {
 
 __MODEL_MEGATRON_WEIGHT_LOADER_REGISTRY__ = {
     "GPT2LMHeadModel": gpt2_weight_loader,
-    "LlamaForCausalLM": llama_megatron_core_te_weight_loader,  # use te backend for open-source megatron
-    "LLaMAForCausalLM": llama_megatron_core_te_weight_loader,
+    "LlamaForCausalLM": megatron_core_te_weight_loader,  # use te backend for open-source megatron
+    "LLaMAForCausalLM": megatron_core_te_weight_loader,
     "MistralForCausalLM": mistral_megatron_weight_loader,
-    'Qwen2ForCausalLM': qwen2_megatron_weight_loader,
+    'Qwen2ForCausalLM': megatron_core_te_weight_loader,
 }
 
 

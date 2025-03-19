@@ -678,7 +678,7 @@ def load_state_dict_to_megatron_gptmodel_llama(state_dict, wrapped_models, confi
             if (i == tp_rank) and (tensor is not None):
                 tensor.data.copy_(sync_tensor)
 
-    def _broadcast_tp_shard_tensor_qkv(tensor, q_name, k_name, v_name) -> torch.Tensor:
+    def _broadcast_tp_shard_tensor_qkv(tensor, q_name, k_name, v_name, bias=False) -> torch.Tensor:
         """broadcast tensor in tp shards across mp_group"""
         nonlocal state_dict
         nonlocal mp_group
@@ -697,8 +697,10 @@ def load_state_dict_to_megatron_gptmodel_llama(state_dict, wrapped_models, confi
                 q_size_tp = config.hidden_size // tp_size
                 kv_size_tp = hidden_size_per_head * config.num_key_value_heads // tp_size
                 total_size = q_size_tp + 2 * kv_size_tp
-                new_weight_qkv = torch.empty(total_size * tp_size,
-                                             config.hidden_size,
+                sizes = [total_size*tp_size]
+                if not bias:
+                    sizes.append(config.hidden_size)
+                new_weight_qkv = torch.empty(*sizes,
                                              dtype=params_dtype,
                                              device=torch.cuda.current_device())
                 for i in range(tp_size):
@@ -723,8 +725,10 @@ def load_state_dict_to_megatron_gptmodel_llama(state_dict, wrapped_models, confi
                 q_size_tp = config.hidden_size // tp_size
                 kv_size_tp = hidden_size_per_head
                 total_size = q_size_tp + 2 * kv_size_tp
-                new_weight_qkv = torch.empty(total_size * tp_size,
-                                             config.hidden_size,
+                sizes = [total_size*tp_size]
+                if not bias:
+                    sizes.append(config.hidden_size)
+                new_weight_qkv = torch.empty(*sizes,
                                              dtype=params_dtype,
                                              device=torch.cuda.current_device())
                 for i in range(tp_size):
@@ -817,6 +821,12 @@ def load_state_dict_to_megatron_gptmodel_llama(state_dict, wrapped_models, confi
                 f"{layer_name}.self_attn.k_proj.weight",
                 f"{layer_name}.self_attn.v_proj.weight",
             )
+            if f"{layer_name}.self_attn.q_proj.bias" in state_dict:
+                _broadcast_tp_shard_tensor_qkv(sync_layer.self_attention.linear_qkv.bias if dst_pp_rank == pp_rank else None,
+                                           f"{layer_name}.self_attn.q_proj.bias",
+                                           f"{layer_name}.self_attn.k_proj.bias",
+                                           f"{layer_name}.self_attn.v_proj.bias",
+                                           bias=True)
 
             _broadcast_tp_shard_tensor(
                 sync_layer.self_attention.linear_proj.weight if dst_pp_rank == pp_rank else None,
@@ -880,7 +890,7 @@ def load_state_dict_to_megatron_gptmodel_llama(state_dict, wrapped_models, confi
     torch.cuda.empty_cache()
     print_rank_0(f"loading megatron ckpt done, time elapsed {time.time() - start_time}s")
 
-def linear_qkv_convert_from_hf_to_te(param, num_query_groups, num_attention_heads, head_dim):
+def linear_qkv_convert_from_hf_to_te(param, num_query_groups, num_attention_heads):
     from megatron.core import mpu
     tp_size = mpu.get_tensor_model_parallel_world_size()
     if tp_size!=1:
@@ -889,10 +899,12 @@ def linear_qkv_convert_from_hf_to_te(param, num_query_groups, num_attention_head
     if num_query_groups_per_partition==1:
         return
 
-    q_part = param[:num_attention_heads * head_dim]
-    kv_part = param[num_attention_heads * head_dim:]
+    dim_size = param.data.numel() // (num_attention_heads+num_query_groups*2)
+
+    q_part = param[:num_attention_heads * dim_size]
+    kv_part = param[num_attention_heads * dim_size:]
     k_part,v_part = kv_part.chunk(2, dim=0)
-    assert k_part.shape[0] == num_query_groups * head_dim    
+    assert k_part.shape[0] == num_query_groups * dim_size    
     q_part_per_head = torch.chunk(q_part, num_query_groups_per_partition, dim=0)
     k_part_per_head = torch.chunk(k_part, num_query_groups_per_partition, dim=0)
     v_part_per_head = torch.chunk(v_part, num_query_groups_per_partition, dim=0)

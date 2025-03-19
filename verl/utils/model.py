@@ -406,6 +406,7 @@ from dataclasses import dataclass
 
 @dataclass
 class GPTModelOption:
+    # only support LLaMa to change the options
     my_self_attention: bool = False
     my_core_attention: bool = False
     my_mlp: bool = False

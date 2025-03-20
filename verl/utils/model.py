@@ -354,13 +354,12 @@ def load_megatron_gptmodel_weights(config,
         model = AutoModelForCausalLM.from_pretrained(local_model_path)
         state_dict = model.state_dict()
 
-    from verl.models.llama.megatron.checkpoint_utils.llama_loader import load_state_dict_to_megatron_gptmodel_llama
-
-    load_state_dict_to_megatron_gptmodel_llama(state_dict=state_dict,
-                                               wrapped_models=parallel_model,
-                                               config=model.config,
-                                               params_dtype=params_dtype,
-                                               is_value_model=is_value_model)
+    from verl.models.mcore.loader import load_state_dict_to_megatron_gptmodel
+    load_state_dict_to_megatron_gptmodel(state_dict=state_dict,
+                                         wrapped_models=parallel_model,
+                                         config=model.config,
+                                         params_dtype=params_dtype,
+                                         is_value_model=is_value_model)
     del state_dict, model
 
 
@@ -425,17 +424,28 @@ class GPTModelOption:
             assert self.seperate_rms_norm_mlp
         # pure GPTModel is used when all the above are False
 
+
 import os
+
+
+def _get_option_from_env(name):
+    if name in os.environ:
+        return bool(eval(os.environ[name]))
+    return False
+
+
 gptmodel_option = GPTModelOption(
-my_self_attention = 'my_self_attention' in os.environ and bool(eval(os.environ['my_self_attention'])),
-my_core_attention = 'my_core_attention' in os.environ and bool(eval(os.environ['my_core_attention'])),
-my_mlp = 'my_mlp' in os.environ and bool(eval(os.environ['my_mlp'])),
-my_rmsnorm = 'my_rmsnorm' in os.environ and bool(eval(os.environ['my_rmsnorm'])),
-seperate_rms_norm_attention = 'seperate_rms_norm_attention' in os.environ and bool(eval(os.environ['seperate_rms_norm_attention'])),
-seperate_rms_norm_mlp = 'seperate_rms_norm_mlp' in os.environ and bool(eval(os.environ['seperate_rms_norm_mlp'])),
-seq_packing = 'seq_packing' in os.environ and bool(eval(os.environ['seq_packing'])),
+    my_self_attention=_get_option_from_env('GPTMODEL_MY_SELF_ATTENTION'),
+    my_core_attention=_get_option_from_env('GPTMODEL_MY_CORE_ATTENTION'),
+    my_mlp=_get_option_from_env('GPTMODEL_MY_MLP'),
+    my_rmsnorm=_get_option_from_env('GPTMODEL_MY_RMSNORM'),
+    seperate_rms_norm_attention=_get_option_from_env('GPTMODEL_SEPERATE_RMS_NORM_ATTENTION'),
+    seperate_rms_norm_mlp=_get_option_from_env('GPTMODEL_SEPERATE_RMS_NORM_MLP'),
+    seq_packing=_get_option_from_env('GPTMODEL_SEQ_PACKING'),
 )
 print(gptmodel_option)
+
+
 def get_parallel_gptmodel_from_config(tfconfig,
                                       hf_config,
                                       pre_process=None,
@@ -450,6 +460,8 @@ def get_parallel_gptmodel_from_config(tfconfig,
     use_te = True
     assert tfconfig.normalization == "RMSNorm", 'only RMSNorm is supported for now'
     gptmodel_option.validate()
+    if "Qwen2ForCausalLM" in hf_config.architectures:
+        assert not gptmodel_option.my_self_attention, 'my_self_attention only support for LLaMa'
     transformer_layer_spec = get_gpt_decoder_block_spec(tfconfig, use_transformer_engine=use_te)
 
     parallel_model = GPTModel(
@@ -470,5 +482,5 @@ def get_parallel_gptmodel_from_config(tfconfig,
         parallel_model.output_layer = LinearForLastLayer(input_size=tfconfig.hidden_size,
                                                          output_size=1,
                                                          config=tfconfig)
-    print(gptmodel_option,parallel_model)
+    print(gptmodel_option, parallel_model)
     return parallel_model

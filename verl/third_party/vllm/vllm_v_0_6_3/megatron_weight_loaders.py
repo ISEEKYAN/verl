@@ -115,7 +115,7 @@ def megatron_core_te_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -
         params_mapping += [("input_layernorm", "input_layernorm")]
     else:
         params_mapping = [("self_attention.linear_qkv.layer_norm_weight", "input_layernorm.weight"),
-        ("self_attention.linear_qkv.layer_norm_bias", "input_layernorm.bias")]+params_mapping
+                          ("self_attention.linear_qkv.layer_norm_bias", "input_layernorm.bias")] + params_mapping
 
     # NOTE(shengguangming): the megatron llama may have this prefix
     params_dict = dict(vllm_model.named_parameters())
@@ -133,9 +133,9 @@ def megatron_core_te_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -
             if not gptmodel_option.my_self_attention:
                 # use TE linear qkv, need to transpose the weight,
                 # in TE, QKV is not directly concat of qkv, but qkv by groups
-                from verl.models.llama.megatron.checkpoint_utils.llama_loader import linear_qkv_convert_from_hf_to_te
-                linear_qkv_convert_from_hf_to_te(param, vllm_model.config.num_key_value_heads, vllm_model.config.num_attention_heads)
-
+                from verl.models.mcore.loader import linear_qkv_convert_from_hf_to_te
+                linear_qkv_convert_from_hf_to_te(param, vllm_model.config.num_key_value_heads,
+                                                 vllm_model.config.num_attention_heads)
 
 
 def _replace_name(megatron_name, name_mapping):
@@ -159,7 +159,6 @@ def _replace_name(megatron_name, name_mapping):
         else:
             param_name = megatron_name.replace(m_name, v_name)
             return param_name
-
 
 
 def llama_megatron_core_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -> nn.Module:
@@ -190,7 +189,6 @@ def llama_megatron_core_weight_loader(actor_weights: Dict, vllm_model: nn.Module
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
-
 
 
 def mistral_megatron_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -> nn.Module:

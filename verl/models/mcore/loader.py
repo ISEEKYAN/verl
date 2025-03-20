@@ -1,23 +1,7 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-import importlib
-from packaging.version import Version
 import torch
 import time
-from typing import Dict, Any, Callable, Optional
 import torch.distributed as dist
+from verl.utils.model import gptmodel_option
 
 
 def _megatron_calc_layer_map(config):
@@ -50,7 +34,7 @@ def _megatron_calc_layer_map(config):
     return layer_map
 
 
-def load_state_dict_to_megatron_llama(state_dict, wrapped_models, config, params_dtype, is_value_model=False):
+def load_state_dict_to_megatron_gptmodel(state_dict, wrapped_models, config, params_dtype, is_value_model=False):
     """Load merged state_dict to sharded Megatron module in training.
     """
     import megatron
@@ -94,7 +78,7 @@ def load_state_dict_to_megatron_llama(state_dict, wrapped_models, config, params
     for i, wrapped_model in enumerate(wrapped_models):
         models[i] = unwrap_model(wrapped_model, (torchDDP, LocalDDP, Float16Module))
         gpt_model_module = _get_gpt_model(models[i])
-        assert len(gpt_model_module.model.layers) == num_layers_per_model
+        assert len(gpt_model_module.decoder.layers) == num_layers_per_model
 
     def _broadcast_tensor(tensor, name) -> torch.Tensor:
         """broadcast tensor from rank0 across mp_group"""
@@ -277,7 +261,7 @@ def load_state_dict_to_megatron_llama(state_dict, wrapped_models, config, params
             if (i == tp_rank) and (tensor is not None):
                 tensor.data.copy_(sync_tensor)
 
-    def _broadcast_tp_shard_tensor_qkv(tensor, q_name, k_name, v_name) -> torch.Tensor:
+    def _broadcast_tp_shard_tensor_qkv(tensor, q_name, k_name, v_name, bias=False) -> torch.Tensor:
         """broadcast tensor in tp shards across mp_group"""
         nonlocal state_dict
         nonlocal mp_group
@@ -296,33 +280,54 @@ def load_state_dict_to_megatron_llama(state_dict, wrapped_models, config, params
                 q_size_tp = config.hidden_size // tp_size
                 kv_size_tp = hidden_size_per_head * config.num_key_value_heads // tp_size
                 total_size = q_size_tp + 2 * kv_size_tp
-                new_weight_qkv = torch.empty(total_size * tp_size,
-                                             config.hidden_size,
-                                             dtype=params_dtype,
-                                             device=torch.cuda.current_device())
+                sizes = [total_size * tp_size]
+                if not bias:
+                    sizes.append(config.hidden_size)
+                new_weight_qkv = torch.empty(*sizes, dtype=params_dtype, device=torch.cuda.current_device())
                 for i in range(tp_size):
                     q_part = full_weight_q[i * q_size_tp:(i + 1) * q_size_tp]
                     k_part = full_weight_k[i * kv_size_tp:(i + 1) * kv_size_tp]
                     v_part = full_weight_v[i * kv_size_tp:(i + 1) * kv_size_tp]
-                    new_weight_qkv[i * total_size:(i + 1) * total_size].copy_(torch.cat([q_part, k_part, v_part],
-                                                                                        dim=0))
+                    if gptmodel_option.my_self_attention:
+                        new_weight_qkv[i * total_size:(i + 1) * total_size].copy_(
+                            torch.cat([q_part, k_part, v_part], dim=0))
+                    else:
+                        num_query_groups_per_partition = models[0].config.num_query_groups // tp_size
+                        new_weight_qkv_this_tp = new_weight_qkv[i * total_size:(i + 1) * total_size]
+                        q_part_per_head = torch.chunk(q_part, num_query_groups_per_partition, dim=0)
+                        k_part_per_head = torch.chunk(k_part, num_query_groups_per_partition, dim=0)
+                        v_part_per_head = torch.chunk(v_part, num_query_groups_per_partition, dim=0)
+                        total_size_per_head = total_size // num_query_groups_per_partition
+                        for j in range(num_query_groups_per_partition):
+                            new_weight_qkv_this_tp[j * total_size_per_head:(j + 1) * total_size_per_head].copy_(
+                                torch.cat([q_part_per_head[j], k_part_per_head[j], v_part_per_head[j]], dim=0))
 
             else:
                 q_size_tp = config.hidden_size // tp_size
                 kv_size_tp = hidden_size_per_head
                 total_size = q_size_tp + 2 * kv_size_tp
-                new_weight_qkv = torch.empty(total_size * tp_size,
-                                             config.hidden_size,
-                                             dtype=params_dtype,
-                                             device=torch.cuda.current_device())
+                sizes = [total_size * tp_size]
+                if not bias:
+                    sizes.append(config.hidden_size)
+                new_weight_qkv = torch.empty(*sizes, dtype=params_dtype, device=torch.cuda.current_device())
                 for i in range(tp_size):
                     q_part = full_weight_q[i * q_size_tp:(i + 1) * q_size_tp]
                     start_idx = i * config.num_key_value_heads // tp_size * hidden_size_per_head
                     end_idx = (i * config.num_key_value_heads // tp_size + 1) * hidden_size_per_head
                     k_part = full_weight_k[start_idx:end_idx]
                     v_part = full_weight_v[start_idx:end_idx]
-                    new_weight_qkv[i * total_size:(i + 1) * total_size].copy_(torch.cat([q_part, k_part, v_part],
-                                                                                        dim=0))
+                    if gptmodel_option.my_self_attention:
+                        new_weight_qkv[i * total_size:(i + 1) * total_size].copy_(
+                            torch.cat([q_part, k_part, v_part], dim=0))
+                    else:
+                        new_weight_qkv_this_tp = new_weight_qkv[i * total_size:(i + 1) * total_size]
+                        q_part_per_head = torch.chunk(q_part, config.num_attention_heads, dim=0)
+                        k_part_per_head = torch.chunk(k_part, config.num_attention_heads, dim=0)
+                        v_part_per_head = torch.chunk(v_part, config.num_attention_heads, dim=0)
+                        total_size_per_head = total_size // config.num_attention_heads
+                        for j in range(config.num_attention_heads):
+                            new_weight_qkv_this_tp[j * total_size_per_head:(j + 1) * total_size_per_head].copy_(
+                                torch.cat([q_part_per_head[j], k_part_per_head[j], v_part_per_head[j]], dim=0))
 
             tensor_chunk = torch.chunk(new_weight_qkv, tp_size, dim=0)
             chunk_shape = tensor_chunk[0].shape
@@ -363,7 +368,7 @@ def load_state_dict_to_megatron_llama(state_dict, wrapped_models, config, params
         gpt_model_module = _get_gpt_model(models[0])
         embed_tokens_weight = None
         if pp_rank == 0:
-            embed_tokens_weight = gpt_model_module.model.embed_tokens.weight
+            embed_tokens_weight = gpt_model_module.embedding.word_embeddings.weight
         _broadcast_tp_shard_tensor_vocab(embed_tokens_weight, "model.embed_tokens.weight")
 
         # Transformer layers
@@ -376,36 +381,54 @@ def load_state_dict_to_megatron_llama(state_dict, wrapped_models, config, params
             dst_pp_rank, dst_virtual_pp_rank, dst_layer_idx = layer_map[layer]
 
             gpt_model_module = _get_gpt_model(models[dst_virtual_pp_rank])
-            sync_layer = gpt_model_module.model.layers[dst_layer_idx]
+            sync_layer = gpt_model_module.decoder.layers[dst_layer_idx]
 
-            _broadcast_tensor(
-                sync_layer.input_layernorm.weight if dst_pp_rank == pp_rank else None,
-                f"{layer_name}.input_layernorm.weight",
-            )
+            if gptmodel_option.seperate_rms_norm_attention:
+                _broadcast_tensor(
+                    sync_layer.input_layernorm.weight if dst_pp_rank == pp_rank else None,
+                    f"{layer_name}.input_layernorm.weight",
+                )
+            else:
+                _broadcast_tensor(
+                    sync_layer.self_attention.linear_qkv.layer_norm_weight if dst_pp_rank == pp_rank else None,
+                    f"{layer_name}.input_layernorm.weight",
+                )
 
             _broadcast_tp_shard_tensor_qkv(
-                sync_layer.self_attn.qkv_proj.weight if dst_pp_rank == pp_rank else None,
+                sync_layer.self_attention.linear_qkv.weight if dst_pp_rank == pp_rank else None,
                 f"{layer_name}.self_attn.q_proj.weight",
                 f"{layer_name}.self_attn.k_proj.weight",
                 f"{layer_name}.self_attn.v_proj.weight",
             )
+            if f"{layer_name}.self_attn.q_proj.bias" in state_dict:
+                _broadcast_tp_shard_tensor_qkv(
+                    sync_layer.self_attention.linear_qkv.bias if dst_pp_rank == pp_rank else None,
+                    f"{layer_name}.self_attn.q_proj.bias",
+                    f"{layer_name}.self_attn.k_proj.bias",
+                    f"{layer_name}.self_attn.v_proj.bias",
+                    bias=True)
 
             _broadcast_tp_shard_tensor(
-                sync_layer.self_attn.o_proj.weight if dst_pp_rank == pp_rank else None,
+                sync_layer.self_attention.linear_proj.weight if dst_pp_rank == pp_rank else None,
                 f"{layer_name}.self_attn.o_proj.weight",
                 chunk_dim=1,
             )
+            if gptmodel_option.seperate_rms_norm_mlp:
+                _broadcast_tensor(
+                    sync_layer.pre_mlp_layernorm.weight if dst_pp_rank == pp_rank else None,
+                    f"{layer_name}.post_attention_layernorm.weight",
+                )
+            else:
+                _broadcast_tensor(
+                    sync_layer.mlp.linear_fc1.layer_norm_weight if dst_pp_rank == pp_rank else None,
+                    f"{layer_name}.post_attention_layernorm.weight",
+                )
 
-            _broadcast_tensor(
-                sync_layer.post_attention_layernorm.weight if dst_pp_rank == pp_rank else None,
-                f"{layer_name}.post_attention_layernorm.weight",
-            )
-
-            _broadcast_tp_shard_tensor_gate_up(sync_layer.mlp.gate_up_proj.weight if dst_pp_rank == pp_rank else None,
+            _broadcast_tp_shard_tensor_gate_up(sync_layer.mlp.linear_fc1.weight if dst_pp_rank == pp_rank else None,
                                                f"{layer_name}.mlp.gate_proj.weight", f"{layer_name}.mlp.up_proj.weight")
 
             _broadcast_tp_shard_tensor(
-                sync_layer.mlp.down_proj.weight if dst_pp_rank == pp_rank else None,
+                sync_layer.mlp.linear_fc2.weight if dst_pp_rank == pp_rank else None,
                 f"{layer_name}.mlp.down_proj.weight",
                 chunk_dim=1,
             )
@@ -414,14 +437,14 @@ def load_state_dict_to_megatron_llama(state_dict, wrapped_models, config, params
         print_rank_0("loading final layernorm...")
         gpt_model_module = _get_gpt_model(models[-1])
         _broadcast_tensor(
-            getattr(gpt_model_module.model.norm, "weight", None),
+            getattr(gpt_model_module.decoder.final_layernorm, "weight", None),
             "model.norm.weight",
         )
 
         print_rank_0("loading lm_head...")
         lm_head_weight = None
         if pp_rank + 1 == pp_size:
-            lm_head_weight = gpt_model_module.lm_head.weight
+            lm_head_weight = gpt_model_module.output_layer.weight
 
         if is_value_model:
             # if torch.distributed.get_rank() == 0:
@@ -443,6 +466,33 @@ def load_state_dict_to_megatron_llama(state_dict, wrapped_models, config, params
     # Broadcast weights inside data parallel groups
     for wrapped_model in wrapped_models:
         broadcast_params(wrapped_model)
-
+    pass
     torch.cuda.empty_cache()
     print_rank_0(f"loading megatron ckpt done, time elapsed {time.time() - start_time}s")
+
+
+def linear_qkv_convert_from_hf_to_te(param, num_query_groups, num_attention_heads):
+    from megatron.core import mpu
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    if tp_size != 1:
+        return
+    num_query_groups_per_partition = num_query_groups
+    if num_query_groups_per_partition == 1:
+        return
+
+    dim_size = param.data.numel() // (num_attention_heads + num_query_groups * 2)
+
+    q_part = param[:num_attention_heads * dim_size]
+    kv_part = param[num_attention_heads * dim_size:]
+    k_part, v_part = kv_part.chunk(2, dim=0)
+    assert k_part.shape[0] == num_query_groups * dim_size
+    q_part_per_head = torch.chunk(q_part, num_query_groups_per_partition, dim=0)
+    k_part_per_head = torch.chunk(k_part, num_query_groups_per_partition, dim=0)
+    v_part_per_head = torch.chunk(v_part, num_query_groups_per_partition, dim=0)
+    total_size_per_head = param.data.numel() // num_query_groups_per_partition
+    new_weight_qkv = torch.empty_like(param.data, device=param.device)
+    for j in range(num_query_groups_per_partition):
+        new_weight_qkv[j * total_size_per_head:(j + 1) * total_size_per_head].copy_(
+            torch.cat([q_part_per_head[j], k_part_per_head[j], v_part_per_head[j]], dim=0))
+    param.data = new_weight_qkv
+    return

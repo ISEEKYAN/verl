@@ -169,12 +169,13 @@ class ActorRolloutRefWorker(MegatronWorker):
         def megatron_actor_model_provider(pre_process, post_process):
             share_embeddings_and_output_weights = getattr(actor_model_config, "tie_word_embeddings", False)
             from verl.utils.model import get_parallel_gptmodel_from_config
-            parallel_model = get_parallel_gptmodel_from_config(tfconfig,
-                                                               actor_model_config,
-                                                               pre_process,
-                                                               post_process,
-                                                               share_embeddings_and_output_weights=share_embeddings_and_output_weights,
-                                                               value=False)
+            parallel_model = get_parallel_gptmodel_from_config(
+                tfconfig,
+                actor_model_config,
+                pre_process,
+                post_process,
+                share_embeddings_and_output_weights=share_embeddings_and_output_weights,
+                value=False)
             parallel_model.cuda()
             return parallel_model
 
@@ -188,10 +189,10 @@ class ActorRolloutRefWorker(MegatronWorker):
                 actor_module = [actor_module[0]]
             if self.config.actor.load_weight:
                 load_megatron_gptmodel_weights(self.config,
-                                            actor_model_config,
-                                            actor_module,
-                                            params_dtype=megatron_config.params_dtype,
-                                            is_value_model=False)
+                                               actor_model_config,
+                                               actor_module,
+                                               params_dtype=megatron_config.params_dtype,
+                                               is_value_model=False)
 
             if self.rank == 0:
                 print_model_size(actor_module[0])
@@ -207,10 +208,10 @@ class ActorRolloutRefWorker(MegatronWorker):
                 assert self.config.actor.load_weight == self.config.ref.load_weight
                 print(f'load ref weight start')
                 load_megatron_gptmodel_weights(self.config,
-                                            actor_model_config,
-                                            ref_module,
-                                            params_dtype=megatron_config.params_dtype,
-                                            is_value_model=False)
+                                               actor_model_config,
+                                               ref_module,
+                                               params_dtype=megatron_config.params_dtype,
+                                               is_value_model=False)
             log_gpu_memory_usage('After ref module init', logger=logger)
             return ref_module, actor_model_config
 
@@ -235,8 +236,10 @@ class ActorRolloutRefWorker(MegatronWorker):
             # NOTE(sgm): If the QKV and gate_up projection layer are concate together in actor,
             # we will reorganize their weight format when resharding from actor to rollout.
             layer_name_mapping = {
-                "qkv_layer_name": [self.config.rollout.layer_name_map.get("qkv_layer_name", "qkv"), "self_attention.linear_qkv.weight"],
-                "gate_proj_layer_name":[
+                "qkv_layer_name": [
+                    self.config.rollout.layer_name_map.get("qkv_layer_name", "qkv"), "self_attention.linear_qkv.weight"
+                ],
+                "gate_proj_layer_name": [
                     self.config.rollout.layer_name_map.get("gate_proj_layer_name", "linear_fc1.weight"),
                     "linear_fc1.weight"
                 ],

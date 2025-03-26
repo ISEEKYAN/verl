@@ -707,8 +707,8 @@ class RewardModelWorker(MegatronWorker):
     def _build_rm_model(self, model_path, megatron_config: ModelParallelConfig, override_model_config):
         from megatron.core.models.gpt.gpt_model import ModelType
         from verl.utils.model import update_model_config
-        from verl.utils.megatron_utils import get_model
         from transformers import AutoConfig
+        from verl.utils.megatron_utils import get_model,convert_config
 
         # Step 1: initialize the tokenizer
         local_path = copy_to_local(model_path)
@@ -742,10 +742,14 @@ class RewardModelWorker(MegatronWorker):
             return parallel_model
 
         # Step 3: initialize the megatron model
+        # reward_model = get_model(model_provider_func=megatron_rm_model_provider,
+        #                          model_type=ModelType.encoder_or_decoder,
+        #                          wrap_with_ddp=False,
+        #                          use_distributed_optimizer=self.config.reward_model.megatron.use_distributed_optimizer)
         reward_model = get_model(model_provider_func=megatron_rm_model_provider,
                                  model_type=ModelType.encoder_or_decoder,
                                  wrap_with_ddp=False,
-                                 use_distributed_optimizer=self.config.reward_model.use_distributed_optimizer)
+                                 use_distributed_optimizer=self.config.megatron.use_distributed_optimizer)
         # note that here critic_module will be a list to be compatible with the construction of interleaved pp (vpp).
         # but here, we do not use pp (vpp) yet. For simplicity, we remove the list
         # reward_model = nn.ModuleList(reward_model)

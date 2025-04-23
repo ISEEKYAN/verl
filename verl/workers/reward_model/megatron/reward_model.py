@@ -212,14 +212,22 @@ class MegatronRewardModel(BasePPORewardModel):
         forward_backward_func = get_forward_backward_func()
 
         def loss_func(output):
-            return 1., {'logits': output.logits}
+            return 1.0, {'logits': output}
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             position_ids = batch['position_ids']
-            output = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
+            from verl.models.mcore import gptmodel_forward
+ 
+            output = gptmodel_forward(model,
+                                    input_ids,
+                                    attention_mask,
+                                    position_ids,
+                                    sequence_parallel=self.megatron_config.sequence_parallel)
+
+            output = output[..., 0]
             return output, loss_func
 
         # batch should be a list of batches inside micro-batches

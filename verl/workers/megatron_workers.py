@@ -169,7 +169,6 @@ class ActorRolloutRefWorker(MegatronWorker):
         self.architectures = getattr(actor_model_config, "architectures", None)
 
         tfconfig = convert_config(actor_model_config, megatron_config)
-        self.hf_config = actor_model_config
         print(f'TF config: {tfconfig}')
         self.hf_config = actor_model_config
 
@@ -709,8 +708,8 @@ class RewardModelWorker(MegatronWorker):
     def _build_rm_model(self, model_path, megatron_config: ModelParallelConfig, override_model_config):
         from megatron.core.models.gpt.gpt_model import ModelType
         from verl.utils.model import update_model_config
-        from verl.utils.megatron_utils import get_model
         from transformers import AutoConfig
+        from verl.utils.megatron_utils import get_model,convert_config
 
         # Step 1: initialize the tokenizer
         local_path = copy_to_local(model_path)
@@ -729,37 +728,39 @@ class RewardModelWorker(MegatronWorker):
 
         if self.rank == 0:
             print(f'Model config after override: rm_model_config {rm_model_config}')
+        tfconfig = convert_config(rm_model_config, megatron_config)
+        print(f'TF config: {tfconfig}')
 
         def megatron_rm_model_provider(pre_process, post_process):
-            from verl.utils.model import get_parallel_model_from_config
-            # vpp is not supported yet because it will hang for some reason. Need debugging
-            vpp_rank = mpu.get_virtual_pipeline_model_parallel_rank()  # this will be set inside get_model
-            # this_megatron_config = copy.deepcopy(megatron_config)
-            # this_megatron_config.virtual_pipeline_model_parallel_rank = vpp_rank
-            parallel_model = get_parallel_model_from_config(config=rm_model_config,
-                                                            megatron_config=megatron_config,
-                                                            pre_process=pre_process,
-                                                            post_process=post_process,
-                                                            share_embeddings_and_output_weights=False,
-                                                            value=True)
+            from verl.utils.model import get_parallel_gptmodel_from_config
+            parallel_model = get_parallel_gptmodel_from_config(tfconfig,
+                                                               rm_model_config,
+                                                               pre_process,
+                                                               post_process,
+                                                               share_embeddings_and_output_weights=False,
+                                                               value=True)
             parallel_model.cuda()
             return parallel_model
 
         # Step 3: initialize the megatron model
+        # reward_model = get_model(model_provider_func=megatron_rm_model_provider,
+        #                          model_type=ModelType.encoder_or_decoder,
+        #                          wrap_with_ddp=False,
+        #                          use_distributed_optimizer=self.config.reward_model.megatron.use_distributed_optimizer)
         reward_model = get_model(model_provider_func=megatron_rm_model_provider,
                                  model_type=ModelType.encoder_or_decoder,
                                  wrap_with_ddp=False,
-                                 use_distributed_optimizer=self.config.reward_model.use_distributed_optimizer)
+                                 use_distributed_optimizer=self.config.megatron.use_distributed_optimizer)
         # note that here critic_module will be a list to be compatible with the construction of interleaved pp (vpp).
         # but here, we do not use pp (vpp) yet. For simplicity, we remove the list
         # reward_model = nn.ModuleList(reward_model)
 
         if self.config.load_weight:
-            load_megatron_model_weights(self.config,
-                                        rm_model_config,
-                                        reward_model,
-                                        params_dtype=megatron_config.params_dtype,
-                                        is_value_model=True)
+            load_megatron_gptmodel_weights(self.config,
+                                           rm_model_config,
+                                           reward_model,
+                                           params_dtype=megatron_config.params_dtype,
+                                           is_value_model=True)
 
         # TODO: add more optimizer args into config
         torch.cuda.empty_cache()

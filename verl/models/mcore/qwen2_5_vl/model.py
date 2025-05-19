@@ -11,7 +11,9 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
 from .transformer_config import Qwen2VLTransformerConfig
 from megatron.core.packed_seq_params import PackedSeqParams
-
+from megatron.core import tensor_parallel
+from ..util import preprocess_packed_seqs, postprocess_packed_seqs
+from megatron.core import parallel_state as mpu
 from .visionmodel import Qwen2_5VisionModel
 from ..qwen2_vl.gpt_model import GPTModel
 
@@ -271,10 +273,10 @@ class Qwen2_5VLModel(MegatronModule):
                 video_input_mask = None
                 if image_embeds is not None:
                     # image_input_mask = image_input_mask.T  # shape [seqlen, mbs]
-                    image_input_mask = (input_ids == self.image_token_id).T.contiguous()
+                    image_input_mask = (input_ids == self.image_token_id).contiguous()
                 if video_embeds is not None:
                     # video_input_mask = video_input_mask.T
-                    video_input_mask = (input_ids == self.video_token_id).T.contiguous()
+                    video_input_mask = (input_ids == self.video_token_id).contiguous()
                 combined_embeddings = self.language_model.embedding(
                     input_ids=input_ids,
                     position_ids=None,  # NOTE: disable
@@ -297,6 +299,39 @@ class Qwen2_5VLModel(MegatronModule):
                                       video_grid_thw=video_grid_thw,
                                       attention_mask=attention_mask)
         
+        if packed_seq_params:
+            self.language_model.rotary_pos_emb.sequence_packing=True
+            batch_size, seq_len = attention_mask.shape[:2]
+            position_ids = position_ids.permute(1,2,0).contiguous()# 3xBxS -> BxSx3
+            position_ids, packed_seq_params = preprocess_packed_seqs(position_ids, attention_mask, pre_process=True)
+            position_ids = position_ids.permute(2,0,1)# BxSx3 -> 3xBxS
+            position_ids = position_ids.contiguous()
+            if self.pre_process:
+                combined_embeddings = combined_embeddings.permute(1,0,2).contiguous()# SxBxH -> BxSxH
+                combined_embeddings, _ = preprocess_packed_seqs(combined_embeddings, attention_mask, pre_process=self.pre_process)
+                combined_embeddings = combined_embeddings.permute(1,0,2)# BxSxH -> SxBxH
+                combined_embeddings = combined_embeddings.contiguous()
+                if self.language_model.config.sequence_parallel:
+                    combined_embeddings = tensor_parallel.scatter_to_sequence_parallel_region(combined_embeddings)
+            attention_mask = None
+        else:
+            self.language_model.rotary_pos_emb.sequence_packing=False
+            if self.pre_process and (mpu.get_context_parallel_world_size() > 1 or self.language_model.config.sequence_parallel):
+                from ..qwen2_vl.rotary_pos_embedding import get_pos_emb_on_this_cp_rank
+                combined_embeddings = get_pos_emb_on_this_cp_rank(combined_embeddings, 0)
+                
+                # attention_mask = None
+                batch_size, seq_len = attention_mask.shape[:2]
+                mask = torch.zeros((batch_size, seq_len, seq_len), device=combined_embeddings.device)
+                for i in range(batch_size):
+                    this_seq_len = attention_mask[i].sum().item()
+                    mask[i,:this_seq_len,:this_seq_len] = torch.tril(torch.ones((this_seq_len, this_seq_len), device=combined_embeddings.device))
+                mask = get_pos_emb_on_this_cp_rank(mask, 2)
+                attention_mask = mask
+                combined_embeddings = combined_embeddings
+                combined_embeddings = tensor_parallel.scatter_to_sequence_parallel_region(combined_embeddings)
+                combined_embeddings = combined_embeddings.contiguous()
+
         output = self.language_model(
             input_ids=None,
             position_ids=position_ids,  # None in encoder

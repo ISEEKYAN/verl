@@ -78,6 +78,7 @@ def get_vision_model_config(config):
     
     config.fullatt_block_indexes = [7, 15, 23, 31]
     config._qwen2_5_vl_window_size = 112
+    config.cp_comm_type = 'p2p'
     return config
 
 def get_vision_projection_config(config, embed_dim, spatial_merge_size):

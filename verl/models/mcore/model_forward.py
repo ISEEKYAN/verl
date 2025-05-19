@@ -83,20 +83,20 @@ def gptmodel_forward_qwen2_5_vl(
     post_process = unwrap_model(model).post_process
     if pack_seqs:
         batch_size, seq_len = attention_mask.shape[:2]
-        input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True)
-        input_ids_rmpad = input_ids_rmpad.contiguous()
-        output_orig = model(
-            input_ids=input_ids_rmpad,
-            attention_mask=None,
+        
+        output = model(
+            input_ids=input_ids,
             position_ids=position_ids,
-            packed_seq_params=packed_seq_params,
+            attention_mask=attention_mask,
+            packed_seq_params=True,
             pixel_values=multi_modal_inputs["pixel_values"].to(input_ids.device),
             image_grid_thw=multi_modal_inputs["image_grid_thw"].to(input_ids.device),
         )
-
+        _, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=pre_process)
         output = postprocess_packed_seqs(
-            output_orig, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process
+            output, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process
         )
+
     else:
         batch_size, sequence_length = attention_mask.shape
         new_input_ids, new_attention_mask, new_position_ids = remove_left_padding(

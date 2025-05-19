@@ -89,6 +89,7 @@ class Qwen2VLRotaryEmbedding(nn.Module):
                 / dim
             )
         )
+        self.sequence_packing=False
 
     def forward(self, position_ids: torch.Tensor, mrope_section: List[int]) -> Tensor:
         """Forward pass of multimodal RoPE embedding.
@@ -126,9 +127,9 @@ class Qwen2VLRotaryEmbedding(nn.Module):
         
         # shape (seq_length, bs, 1, 2 * dim)
         emb = emb[..., None, :].transpose(0, 1).contiguous()
-        if parallel_state.get_context_parallel_world_size() > 1:
+        if parallel_state.get_context_parallel_world_size() > 1 and not self.sequence_packing:
             # slice rotary_pos_emb along sequence dimension and select the parition of the current CP rank
-            emb = get_pos_emb_on_this_cp_rank(emb, 1)
+            emb = get_pos_emb_on_this_cp_rank(emb, 0)
         return emb
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):

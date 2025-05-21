@@ -136,7 +136,7 @@ class LanguageModelEmbedding(MegatronModule):
         # If the input flag for fp32 residual connection is set, convert for float.
         if self.config.fp32_residual_connection:
             embeddings = embeddings.float()
-
+        embeddings = embeddings.permute(1,0,2)
         # Dropout.
         if self.config.sequence_parallel:
             if not self.reduce_scatter_embeddings:
@@ -160,5 +160,5 @@ class LanguageModelEmbedding(MegatronModule):
             if video_embeds is not None:
                 embeddings[video_input_mask] = video_embeds.to(embeddings.device, embeddings.dtype)
             embeddings = self.embedding_dropout(embeddings)
-
+        embeddings = embeddings.permute(1,0,2)
         return embeddings

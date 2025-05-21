@@ -276,10 +276,10 @@ class Qwen2_5VLModel(MegatronModule):
                 video_input_mask = None
                 if image_embeds is not None:
                     # image_input_mask = image_input_mask.T  # shape [seqlen, mbs]
-                    image_input_mask = (input_ids == self.image_token_id).T.contiguous()
+                    image_input_mask = (input_ids == self.image_token_id).contiguous()
                 if video_embeds is not None:
                     # video_input_mask = video_input_mask.T
-                    video_input_mask = (input_ids == self.video_token_id).T.contiguous()
+                    video_input_mask = (input_ids == self.video_token_id).contiguous()
                 combined_embeddings = self.language_model.embedding(
                     input_ids=input_ids,
                     position_ids=None,  # NOTE: disable

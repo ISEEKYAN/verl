@@ -130,7 +130,7 @@ class Qwen2VLRotaryEmbedding(nn.Module):
         if parallel_state.get_context_parallel_world_size() > 1:
             # slice rotary_pos_emb along sequence dimension and select the parition of the current CP rank
             if self.sequence_packing_func is None:
-                emb = get_pos_emb_on_this_cp_rank(emb, 1)
+                emb = get_pos_emb_on_this_cp_rank(emb, 0)
             else:
                 emb = self.sequence_packing_func(emb)
         return emb

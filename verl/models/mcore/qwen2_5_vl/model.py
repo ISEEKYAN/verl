@@ -14,6 +14,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
 
 from .visionmodel import Qwen2_5VisionModel
 from ..qwen2_vl.gpt_model import GPTModel
+from megatron.core import parallel_state as mpu
 
 # Note: This is under development and may be missing features.
 class Qwen2_5VLModel(MegatronModule):
@@ -326,11 +327,17 @@ class Qwen2_5VLModel(MegatronModule):
                 combined_embeddings= combined_embeddings.contiguous()
                 combined_embeddings, _ = preprocess_packed_seqs(combined_embeddings, attention_mask_backup, pre_process=True)
                 combined_embeddings = combined_embeddings.permute(1,0,2)# BxSxH -> SxBxH
-                combined_embeddings = combined_embeddings.contiguous()
+        else:
+            self.language_model.rotary_pos_emb.sequence_packing_func = None
+            if self.pre_process and mpu.get_context_parallel_world_size() > 1:
+                from ..qwen2_vl.rotary_pos_embedding import get_pos_emb_on_this_cp_rank
+                combined_embeddings = get_pos_emb_on_this_cp_rank(combined_embeddings, 0)
+                
+                
 
         if self.pre_process and self.language_model.config.sequence_parallel:
             combined_embeddings = tensor_parallel.scatter_to_sequence_parallel_region(combined_embeddings)
-        
+        combined_embeddings = combined_embeddings.contiguous()
         output = self.language_model(
             input_ids=None,
             position_ids=position_ids,  # None in encoder

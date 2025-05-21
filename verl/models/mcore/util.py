@@ -162,14 +162,16 @@ def remove_left_padding(
     assert attention_mask.ndim == 2
     assert position_ids.ndim == 2
     cp_size = mpu.get_context_parallel_world_size()
-    assert cp_size == 1, "Context parallel size without seq_pack is not supported"
+    # assert cp_size == 1, "Context parallel size without seq_pack is not supported"
     batch_size = input_ids.shape[0]
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
     seq_len = seq_lens.max().item()
-    if sequence_parallel:
-        sp_world_size = mpu.get_tensor_model_parallel_world_size()
-        pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
+    if sequence_parallel or cp_size > 1:
+        align_size = mpu.get_tensor_model_parallel_world_size()
+        if cp_size > 1:
+            align_size = align_size * cp_size * 2
+        pad_size = (align_size - seq_len % align_size) % align_size
         seq_len = seq_len + pad_size
     shape[1] = seq_len
     if pre_process:
@@ -205,7 +207,29 @@ def recover_left_padding(
     shape = list(result.shape)
     batch_size = shape[0]
     shape[1] = origin_seqlen
+    cp_size = mpu.get_context_parallel_world_size()
+    cp_rank = mpu.get_context_parallel_rank()
     new_result = torch.zeros(dtype=result.dtype, device=result.device, size=shape)
-    for i in range(batch_size):
-        new_result[i, original_attention_mask[i]] = result[i, attention_mask[i]]
+    if cp_size > 1:
+        # output shape: [1, packed_len, hidden_dim]
+        # need to gather across cp group and concatenate in sequence dimension
+
+        output_list = [torch.empty_like(result) for _ in range(cp_size)]
+        torch.distributed.all_gather(output_list, result.detach(), group=mpu.get_context_parallel_group())
+        output_list[cp_rank] = result
+
+        # merge output_list into result
+        chunks = [x.chunk(2, dim=1) for x in output_list]
+
+        for i in range(batch_size):
+            masks = attention_mask[i].chunk(2*cp_size)
+            res_left, res_right = [], []
+            for j in range(cp_size):
+                res_left.append(chunks[j][0][i][masks[j]])
+                res_right.insert(0, chunks[j][1][i][masks[2*cp_size-j-1]])
+            new_result[i, original_attention_mask[i]] = torch.cat(res_left+res_right, dim=0)
+
+    else:
+        for i in range(batch_size):
+            new_result[i, original_attention_mask[i]] = result[i, attention_mask[i]]
     return new_result

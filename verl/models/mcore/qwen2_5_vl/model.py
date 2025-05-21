@@ -5,7 +5,7 @@ from typing import List
 
 import torch
 
-from megatron.core import InferenceParams, parallel_state
+from megatron.core import InferenceParams, parallel_state,tensor_parallel
 from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -207,6 +207,11 @@ class Qwen2_5VLModel(MegatronModule):
         Returns:
             output (torch.Tensor): Loss of shape [b, s] if labels are provided, otherwise logits of shape [b, s, vocab_size].
         """
+        from ..util import preprocess_packed_seqs,postprocess_packed_seqs
+        if packed_seq_params:
+            input_ids, tmp_packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True, cp_size=1,cp_rank=0)
+            attention_mask_backup = attention_mask
+            attention_mask = None
         video_start_index = 0
         vision_grid_thw=None
         vision_data=None
@@ -296,6 +301,35 @@ class Qwen2_5VLModel(MegatronModule):
                                       image_grid_thw=image_grid_thw,
                                       video_grid_thw=video_grid_thw,
                                       attention_mask=attention_mask)
+        if packed_seq_params:
+            cu_seqlens_q_padded = tmp_packed_seq_params.cu_seqlens_q_padded
+            pos_ids =position_ids.clone()
+            for i in range(len(cu_seqlens_q_padded)-1):
+                start,end = cu_seqlens_q_padded[i],cu_seqlens_q_padded[i+1]
+                position_ids[...,start:end]-=pos_ids[0,0,start]
+        if packed_seq_params:
+            batch_size, seq_len = attention_mask_backup.shape[:2]
+            def sequence_packing_func(emb):
+                emb = emb.permute(1,0,2,3).contiguous()
+                emb = postprocess_packed_seqs(emb, tmp_packed_seq_params, attention_mask_backup, batch_size, seq_len, post_process=True, cp_size=1, cp_rank=0)
+                emb, _ = preprocess_packed_seqs(emb, attention_mask_backup, pre_process=True)
+                emb = emb.permute(1,0,2,3).contiguous()
+                return emb
+            self.language_model.rotary_pos_emb.sequence_packing_func = sequence_packing_func
+            tmp = position_ids.permute(1,2,0).contiguous()# 3xBxS -> BxSx3
+            tmp = postprocess_packed_seqs(tmp, tmp_packed_seq_params, attention_mask_backup, batch_size, seq_len, post_process=True, cp_size=1, cp_rank=0)
+            _, packed_seq_params = preprocess_packed_seqs(tmp, attention_mask_backup, pre_process=False)
+
+            if self.pre_process:
+                combined_embeddings = combined_embeddings.permute(1,0,2).contiguous()# SxBxH -> BxSxH
+                combined_embeddings = postprocess_packed_seqs(combined_embeddings, tmp_packed_seq_params, attention_mask_backup, batch_size, seq_len, post_process=True, cp_size=1, cp_rank=0)
+                combined_embeddings= combined_embeddings.contiguous()
+                combined_embeddings, _ = preprocess_packed_seqs(combined_embeddings, attention_mask_backup, pre_process=True)
+                combined_embeddings = combined_embeddings.permute(1,0,2)# BxSxH -> SxBxH
+                combined_embeddings = combined_embeddings.contiguous()
+
+        if self.pre_process and self.language_model.config.sequence_parallel:
+            combined_embeddings = tensor_parallel.scatter_to_sequence_parallel_region(combined_embeddings)
         
         output = self.language_model(
             input_ids=None,

@@ -145,7 +145,7 @@ class LanguageModelEmbedding(MegatronModule):
                     embeddings[image_input_mask] = image_embeds.to(embeddings.device, embeddings.dtype)
                 if video_embeds is not None:
                     embeddings[video_input_mask] = video_embeds.to(embeddings.device, embeddings.dtype)
-                embeddings = tensor_parallel.scatter_to_sequence_parallel_region(embeddings)
+                # embeddings = tensor_parallel.scatter_to_sequence_parallel_region(embeddings)
             # `scatter_to_sequence_parallel_region` returns a view, which prevents
             # the original tensor from being garbage collected. Clone to facilitate GC.
             # Has a small runtime cost (~0.5%).

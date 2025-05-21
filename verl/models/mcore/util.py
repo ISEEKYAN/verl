@@ -19,7 +19,8 @@ from megatron.core.packed_seq_params import PackedSeqParams
 
 
 def preprocess_packed_seqs(
-    input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True
+    input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True,
+    tp_size=None, cp_size=None, cp_rank=None,
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences
@@ -29,9 +30,12 @@ def preprocess_packed_seqs(
     batch_size = input_ids.shape[0]
 
     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
-    tp_size = mpu.get_tensor_model_parallel_world_size()
-    cp_size = mpu.get_context_parallel_world_size()
-    cp_rank = mpu.get_context_parallel_rank()
+    if tp_size is None:
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+    if cp_size is None:
+        cp_size = mpu.get_context_parallel_world_size()
+    if cp_rank is None:
+        cp_rank = mpu.get_context_parallel_rank()
     align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
 
     pad_size = (align_size - seqlens_in_batch % align_size) % align_size
@@ -91,6 +95,8 @@ def postprocess_packed_seqs(
     batch_size: int,
     seq_len: int,
     post_process: bool = True,
+    cp_size=None,
+    cp_rank=None,
 ) -> torch.Tensor:
     """
     Postprocess packed sequences
@@ -100,14 +106,17 @@ def postprocess_packed_seqs(
     shape = [batch_size, seq_len] + list(output.shape[2:])  # 1,packed, dim -> batch_size, seq_len, dim
     output_new = torch.zeros(shape, dtype=output.dtype, device=output.device)
 
-    cp_size = mpu.get_context_parallel_world_size()
+    if cp_size is None:
+        cp_size = mpu.get_context_parallel_world_size()
+    if cp_rank is None:
+        cp_rank = mpu.get_context_parallel_rank()
     # all gather output across context parallel group
     if cp_size > 1:
         # output shape: [1, packed_len, hidden_dim]
         # need to gather across cp group and concatenate in sequence dimension
         output_list = [torch.empty_like(output) for _ in range(cp_size)]
         torch.distributed.all_gather(output_list, output.detach(), group=mpu.get_context_parallel_group())
-        output_list[mpu.get_context_parallel_rank()] = output
+        output_list[cp_rank] = output
     else:
         output_list = [output]
     for i in range(batch_size):

@@ -18,7 +18,10 @@ from megatron.core import parallel_state as mpu
 from megatron.core.packed_seq_params import PackedSeqParams
 
 
-def preprocess_packed_seqs(input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True) -> tuple[torch.Tensor, PackedSeqParams]:
+def preprocess_packed_seqs(
+    input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True,
+    tp_size=None, cp_size=None, cp_rank=None,
+) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences
     CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0 gets first and last chunks, GPU1 gets second and second last chunks, and so on), this is for load balancing with causal masking.
@@ -27,9 +30,12 @@ def preprocess_packed_seqs(input_ids: torch.Tensor, attention_mask: torch.Tensor
     batch_size = input_ids.shape[0]
 
     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
-    tp_size = mpu.get_tensor_model_parallel_world_size()
-    cp_size = mpu.get_context_parallel_world_size()
-    cp_rank = mpu.get_context_parallel_rank()
+    if tp_size is None:
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+    if cp_size is None:
+        cp_size = mpu.get_context_parallel_world_size()
+    if cp_rank is None:
+        cp_rank = mpu.get_context_parallel_rank()
     align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
 
     pad_size = (align_size - seqlens_in_batch % align_size) % align_size
@@ -85,6 +91,8 @@ def postprocess_packed_seqs(
     batch_size: int,
     seq_len: int,
     post_process: bool = True,
+    cp_size=None,
+    cp_rank=None,
 ) -> torch.Tensor:
     """
     Postprocess packed sequences
@@ -94,14 +102,17 @@ def postprocess_packed_seqs(
     shape = [batch_size, seq_len] + list(output.shape[2:])  # 1,packed, dim -> batch_size, seq_len, dim
     output_new = torch.zeros(shape, dtype=output.dtype, device=output.device)
 
-    cp_size = mpu.get_context_parallel_world_size()
+    if cp_size is None:
+        cp_size = mpu.get_context_parallel_world_size()
+    if cp_rank is None:
+        cp_rank = mpu.get_context_parallel_rank()
     # all gather output across context parallel group
     if cp_size > 1:
         # output shape: [1, packed_len, hidden_dim]
         # need to gather across cp group and concatenate in sequence dimension
         output_list = [torch.empty_like(output) for _ in range(cp_size)]
         torch.distributed.all_gather(output_list, output.detach(), group=mpu.get_context_parallel_group())
-        output_list[mpu.get_context_parallel_rank()] = output
+        output_list[cp_rank] = output
     else:
         output_list = [output]
     for i in range(batch_size):
@@ -143,14 +154,16 @@ def remove_left_padding(
     assert attention_mask.ndim == 2
     assert position_ids.ndim == 2
     cp_size = mpu.get_context_parallel_world_size()
-    assert cp_size == 1, "Context parallel size without seq_pack is not supported"
+    # assert cp_size == 1, "Context parallel size without seq_pack is not supported"
     batch_size = input_ids.shape[0]
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
     seq_len = seq_lens.max().item()
-    if sequence_parallel:
-        sp_world_size = mpu.get_tensor_model_parallel_world_size()
-        pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
+    if sequence_parallel or cp_size > 1:
+        align_size = mpu.get_tensor_model_parallel_world_size()
+        if cp_size > 1:
+            align_size = align_size * cp_size * 2
+        pad_size = (align_size - seq_len % align_size) % align_size
         seq_len = seq_len + pad_size
     shape[1] = seq_len
     if pre_process:
@@ -184,7 +197,29 @@ def recover_left_padding(
     shape = list(result.shape)
     batch_size = shape[0]
     shape[1] = origin_seqlen
+    cp_size = mpu.get_context_parallel_world_size()
+    cp_rank = mpu.get_context_parallel_rank()
     new_result = torch.zeros(dtype=result.dtype, device=result.device, size=shape)
-    for i in range(batch_size):
-        new_result[i, original_attention_mask[i]] = result[i, attention_mask[i]]
+    if cp_size > 1:
+        # output shape: [1, packed_len, hidden_dim]
+        # need to gather across cp group and concatenate in sequence dimension
+
+        output_list = [torch.empty_like(result) for _ in range(cp_size)]
+        torch.distributed.all_gather(output_list, result.detach(), group=mpu.get_context_parallel_group())
+        output_list[cp_rank] = result
+
+        # merge output_list into result
+        chunks = [x.chunk(2, dim=1) for x in output_list]
+
+        for i in range(batch_size):
+            masks = attention_mask[i].chunk(2*cp_size)
+            res_left, res_right = [], []
+            for j in range(cp_size):
+                res_left.append(chunks[j][0][i][masks[j]])
+                res_right.insert(0, chunks[j][1][i][masks[2*cp_size-j-1]])
+            new_result[i, original_attention_mask[i]] = torch.cat(res_left+res_right, dim=0)
+
+    else:
+        for i in range(batch_size):
+            new_result[i, original_attention_mask[i]] = result[i, attention_mask[i]]
     return new_result

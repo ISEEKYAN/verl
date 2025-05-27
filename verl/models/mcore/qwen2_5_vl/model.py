@@ -5,7 +5,7 @@ from typing import List
 
 import torch
 
-from megatron.core import InferenceParams, parallel_state
+from megatron.core import InferenceParams, parallel_state,tensor_parallel
 from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -14,6 +14,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
 
 from .visionmodel import Qwen2_5VisionModel
 from ..qwen2_vl.gpt_model import GPTModel
+from megatron.core import parallel_state as mpu
 
 # Note: This is under development and may be missing features.
 class Qwen2_5VLModel(MegatronModule):
@@ -207,6 +208,11 @@ class Qwen2_5VLModel(MegatronModule):
         Returns:
             output (torch.Tensor): Loss of shape [b, s] if labels are provided, otherwise logits of shape [b, s, vocab_size].
         """
+        from ..util import preprocess_packed_seqs,postprocess_packed_seqs
+        if packed_seq_params:
+            input_ids, tmp_packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=True, cp_size=1,cp_rank=0)
+            attention_mask_backup = attention_mask
+            attention_mask = None
         video_start_index = 0
         vision_grid_thw=None
         vision_data=None
@@ -271,10 +277,10 @@ class Qwen2_5VLModel(MegatronModule):
                 video_input_mask = None
                 if image_embeds is not None:
                     # image_input_mask = image_input_mask.T  # shape [seqlen, mbs]
-                    image_input_mask = (input_ids == self.image_token_id).T.contiguous()
+                    image_input_mask = (input_ids == self.image_token_id).contiguous()
                 if video_embeds is not None:
                     # video_input_mask = video_input_mask.T
-                    video_input_mask = (input_ids == self.video_token_id).T.contiguous()
+                    video_input_mask = (input_ids == self.video_token_id).contiguous()
                 combined_embeddings = self.language_model.embedding(
                     input_ids=input_ids,
                     position_ids=None,  # NOTE: disable
@@ -296,7 +302,42 @@ class Qwen2_5VLModel(MegatronModule):
                                       image_grid_thw=image_grid_thw,
                                       video_grid_thw=video_grid_thw,
                                       attention_mask=attention_mask)
-        
+        if packed_seq_params:
+            cu_seqlens_q_padded = tmp_packed_seq_params.cu_seqlens_q_padded
+            pos_ids =position_ids.clone()
+            for i in range(len(cu_seqlens_q_padded)-1):
+                start,end = cu_seqlens_q_padded[i],cu_seqlens_q_padded[i+1]
+                position_ids[...,start:end]-=pos_ids[0,0,start]
+        if packed_seq_params:
+            batch_size, seq_len = attention_mask_backup.shape[:2]
+            def sequence_packing_func(emb):
+                emb = emb.permute(1,0,2,3).contiguous()
+                emb = postprocess_packed_seqs(emb, tmp_packed_seq_params, attention_mask_backup, batch_size, seq_len, post_process=True, cp_size=1, cp_rank=0)
+                emb, _ = preprocess_packed_seqs(emb, attention_mask_backup, pre_process=True)
+                emb = emb.permute(1,0,2,3).contiguous()
+                return emb
+            self.language_model.rotary_pos_emb.sequence_packing_func = sequence_packing_func
+            tmp = position_ids.permute(1,2,0).contiguous()# 3xBxS -> BxSx3
+            tmp = postprocess_packed_seqs(tmp, tmp_packed_seq_params, attention_mask_backup, batch_size, seq_len, post_process=True, cp_size=1, cp_rank=0)
+            _, packed_seq_params = preprocess_packed_seqs(tmp, attention_mask_backup, pre_process=False)
+
+            if self.pre_process:
+                combined_embeddings = combined_embeddings.permute(1,0,2).contiguous()# SxBxH -> BxSxH
+                combined_embeddings = postprocess_packed_seqs(combined_embeddings, tmp_packed_seq_params, attention_mask_backup, batch_size, seq_len, post_process=True, cp_size=1, cp_rank=0)
+                combined_embeddings= combined_embeddings.contiguous()
+                combined_embeddings, _ = preprocess_packed_seqs(combined_embeddings, attention_mask_backup, pre_process=True)
+                combined_embeddings = combined_embeddings.permute(1,0,2)# BxSxH -> SxBxH
+        else:
+            self.language_model.rotary_pos_emb.sequence_packing_func = None
+            if self.pre_process and mpu.get_context_parallel_world_size() > 1:
+                from ..qwen2_vl.rotary_pos_embedding import get_pos_emb_on_this_cp_rank
+                combined_embeddings = get_pos_emb_on_this_cp_rank(combined_embeddings, 0)
+                
+                
+
+        if self.pre_process and self.language_model.config.sequence_parallel:
+            combined_embeddings = tensor_parallel.scatter_to_sequence_parallel_region(combined_embeddings)
+        combined_embeddings = combined_embeddings.contiguous()
         output = self.language_model(
             input_ids=None,
             position_ids=position_ids,  # None in encoder

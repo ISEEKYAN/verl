@@ -255,7 +255,8 @@ class DataParallelPRIMERewardModel:
         if use_dynamic_bsz:
             # split using dynamic bsz
             max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
-            micro_batches, indices = rearrange_micro_batches(batch=batch, max_token_len=max_token_len)
+            use_dynamic_bsz_balance = data.meta_info["use_dynamic_bsz_balance"]
+            micro_batches, indices = rearrange_micro_batches(batch=batch, max_token_len=max_token_len, use_dynamic_bsz_balance=use_dynamic_bsz_balance)
         else:
             micro_batches = batch.split(micro_batch_size)
 
@@ -312,7 +313,8 @@ class DataParallelPRIMERewardModel:
             mini_batch = data
             if self.config.use_dynamic_bsz:
                 max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-                micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
+                use_dynamic_bsz_balance = self.config.use_dynamic_bsz_balance
+                micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len, use_dynamic_bsz_balance=use_dynamic_bsz_balance)
             else:
                 micro_batches = mini_batch.split(self.config.micro_batch_size_per_gpu)
                 self.gradient_accumulation = self.config.mini_batch_size // self.config.micro_batch_size_per_gpu

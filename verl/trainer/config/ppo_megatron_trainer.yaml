@@ -48,6 +48,7 @@ actor_rollout_ref:
     ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
     ppo_micro_batch_size_per_gpu: null
     use_dynamic_bsz: False
+    use_dynamic_bsz_balance: False
     ppo_max_token_len_per_gpu: 16384 # n * ${data.max_prompt_length} + ${data.max_response_length}
     use_torch_compile: True # False to disable torch compile
     # pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
@@ -152,6 +153,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
     log_prob_micro_batch_size_per_gpu: null
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+    log_prob_use_dynamic_bsz_balance: ${actor_rollout_ref.actor.use_dynamic_bsz_balance}
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     # Nsight system profiler configs
     profiler:
@@ -180,6 +182,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
     log_prob_micro_batch_size_per_gpu: null
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+    log_prob_use_dynamic_bsz_balance: ${actor_rollout_ref.actor.use_dynamic_bsz_balance}
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     disable_log_stats: True
     enable_chunked_prefill: False # could get higher throughput
@@ -326,6 +329,7 @@ critic:
   ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
   ppo_micro_batch_size_per_gpu: null
   use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+  use_dynamic_bsz_balance: ${actor_rollout_ref.actor.use_dynamic_bsz_balance}
   ppo_max_token_len_per_gpu: 32768 # (${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}) * 2
   forward_max_token_len_per_gpu: ${critic.ppo_max_token_len_per_gpu}
   ppo_epochs: ${actor_rollout_ref.actor.ppo_epochs}
@@ -375,6 +379,7 @@ reward_model:
   micro_batch_size: null # will be deprecated, use micro_batch_size_per_gpu
   micro_batch_size_per_gpu: null
   use_dynamic_bsz: ${critic.use_dynamic_bsz}
+  use_dynamic_bsz_balance: ${critic.use_dynamic_bsz_balance}
   forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
   max_length: null
   reward_manager: naive

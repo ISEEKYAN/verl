@@ -40,7 +40,7 @@ def test_seqlen_balancing():
     torch.testing.assert_close(new_batch, dataproto.batch)
 
 
-def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):
+def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb, use_dynamic_bsz_balance):
     # 1) init process group & CUDA
     torch.cuda.set_device(rank)
     dist.init_process_group(
@@ -70,6 +70,7 @@ def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):
         dp_group=dist.group.WORLD,
         same_micro_num_in_dp=use_same_dp,
         min_num_micro_batch=min_mb,
+        use_dynamic_bsz_balance=use_dynamic_bsz_balance,
     )
 
     # 4) check the enforced counts

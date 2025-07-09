@@ -67,7 +67,7 @@ class SPINDataParallelPPOActor(DataParallelPPOActor):
         elif use_dynamic_bsz:
             # split using dynamic bsz
             max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
-            micro_batches, indices = rearrange_micro_batches(batch=batch, max_token_len=max_token_len)
+            micro_batches, indices = rearrange_micro_batches(batch=batch, max_token_len=max_token_len, use_dynamic_bsz_balance=data.meta_info["use_dynamic_bsz_balance"])
         else:
             micro_batches = batch.split(micro_batch_size)
 

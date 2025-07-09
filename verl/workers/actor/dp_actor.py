@@ -324,8 +324,9 @@ class DataParallelPPOActor(BasePPOActor):
                 all_multi_modal_inputs_list = data.non_tensor_batch["multi_modal_inputs"]
                 if use_dynamic_bsz:
                     max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
+                    use_dynamic_bsz_balance = data.meta_info["use_dynamic_bsz_balance"]
                     rearranged_text_micro_batches, textual_indices = rearrange_micro_batches(
-                        batch=batch, max_token_len=max_token_len
+                        batch=batch, max_token_len=max_token_len, use_dynamic_bsz_balance=use_dynamic_bsz_balance
                     )
 
                     final_micro_batches_list = []
@@ -343,7 +344,8 @@ class DataParallelPPOActor(BasePPOActor):
                     return micro_batches_dp, None
             elif use_dynamic_bsz:
                 max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
-                micro_batches, indices = rearrange_micro_batches(batch=batch, max_token_len=max_token_len)
+                use_dynamic_bsz_balance = data.meta_info["use_dynamic_bsz_balance"]
+                micro_batches, indices = rearrange_micro_batches(batch=batch, max_token_len=max_token_len, use_dynamic_bsz_balance=use_dynamic_bsz_balance)
                 return micro_batches, indices
             else:
                 micro_batches = batch.split(micro_batch_size)
@@ -421,7 +423,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                         max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                         rearranged_text_micro_batches_tds, textual_indices = rearrange_micro_batches(
-                            batch=batch_tensordict_for_rearrange, max_token_len=max_token_len
+                            batch=batch_tensordict_for_rearrange, max_token_len=max_token_len, use_dynamic_bsz_balance=self.config.use_dynamic_bsz_balance
                         )
 
                         for current_original_indices, text_mb_td in zip(
@@ -441,7 +443,7 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batches = data.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
                 elif self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-                    micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
+                    micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len, use_dynamic_bsz_balance=self.config.use_dynamic_bsz_balance)
                 else:
                     self.gradient_accumulation = (
                         self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu

@@ -70,7 +70,8 @@ def gptmodel_forward(
         output = recover_left_padding(
             output, new_attention_mask, attention_mask, sequence_length, post_process=post_process
         )
-        output = logits_processor(output, **logits_processor_args)
+        if post_process:
+            output = logits_processor(output, **logits_processor_args)
 
     if value_model and post_process:
         output = output[..., 0]

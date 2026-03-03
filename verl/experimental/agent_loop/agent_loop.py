@@ -307,6 +307,13 @@ class AgentLoopBase(ABC):
 
         Returns:
             list[int]: Prompt token ids.
+
+        .. todo::
+            Templates that require a user message (e.g. Qwen 3.5) will fail
+            when *messages* contains only tool/assistant turns.  Migrate to
+            :func:`verl.utils.chat_template.apply_chat_template_single_turn`
+            with ``full_conversation`` fallback — see the SFT dataset for the
+            reference pattern.
         """
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(

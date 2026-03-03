@@ -277,8 +277,8 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
     """Split a TensorDict into equal-sized chunks with special nested tensor handling.
 
     Divides a TensorDict into the specified number of chunks along the batch
-    dimension. Handles 3D+ nested tensors specially since torch.chunk() doesn't
-    support jagged tensors with 3 or more dimensions.
+    dimension. Handles NestedTensors specially since TensorDict.chunk() doesn't
+    support jagged tensors.
 
     Args:
         td: The TensorDict to split.
@@ -292,16 +292,25 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
             evenly divisible by chunks.
 
     Note:
-        PyTorch NestedTensor has issues with unbind/indexing on 2D and 3D
-        jagged tensors: unbind() internally calls split_with_sizes() using the
-        ragged lengths, but the underlying storage may be padded to a different
-        size, causing a RuntimeError.
-        - 3D+: https://github.com/pytorch/pytorch/issues/153238
-        - 2D:  select_int -> unbind -> split_with_sizes mismatch
+        PyTorch ``unbind(dim=0)`` on 3D+ jagged NestedTensors has a bug where
+        ``split_with_sizes`` is applied to the wrong dimension of the internal
+        ``_values`` tensor.  For example, mRoPE ``position_ids`` with per-sample
+        shape ``(4, seq_len)`` becomes a 3D jagged NestedTensor
+        ``[B, *(ragged=4), seq_len]``; ``_values`` is ``[B*4, seq_len]`` and
+        ``unbind`` erroneously splits dimension 1 (``seq_len``) instead of
+        dimension 0, causing::
 
-        For NestedTensors that can be chunked directly (regular batch dim with
-        no ragged interaction), we use the standard TensorDict.chunk(). For
-        those that cannot, we pad -> chunk -> unpad as a workaround.
+            RuntimeError: split_with_sizes expects split_sizes to sum exactly
+            to <seq_len>, but got split_sizes=[4, 4, ...]
+
+        2D jagged NestedTensors (e.g. ``input_ids``, ``loss_mask``) are
+        unaffected — ``unbind(dim=0)`` works correctly for them.
+
+        The workaround: try ``unbind`` first (fast path for 2D); on failure,
+        fall back to ``to_padded_tensor`` → ``chunk`` → reconstruct per-chunk
+        NestedTensors using the original ragged lengths from ``offsets``.
+
+        See https://github.com/pytorch/pytorch/issues/153238
     """
     assert isinstance(td, TensorDict) and len(td) % chunks == 0, (
         f"expecting td with length divisible by chunks, but got {len(td)} and {chunks}"
@@ -315,14 +324,9 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
     tds = new_td.chunk(chunks=chunks)
     for key in nested_keys:
         nt = td[key]
-        # Try the fast path first: direct unbind works for some NestedTensor
-        # layouts where the batch dim is not entangled with the ragged dim.
         try:
             tensors = nt.unbind(dim=0)
         except RuntimeError:
-            # Fallback: pad -> chunk -> unpad.  This avoids the PyTorch bug
-            # where unbind/split_with_sizes fails because ragged lengths don't
-            # match the (padded) storage size.
             padded = nt.to_padded_tensor(0)
             padded_chunks = padded.chunk(chunks, dim=0)
             offsets = nt.offsets()

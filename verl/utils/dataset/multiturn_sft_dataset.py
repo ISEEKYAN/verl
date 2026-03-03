@@ -22,7 +22,6 @@ import re
 from functools import wraps
 from typing import Any, Optional
 
-import jinja2
 import numpy as np
 import pandas as pd
 import torch
@@ -33,7 +32,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.models.transformers.qwen2_vl import get_rope_index
 from verl.utils import hf_tokenizer
-from verl.utils.chat_template import extract_system_prompt_and_generation
+from verl.utils.chat_template import apply_chat_template_single_turn, extract_system_prompt_and_generation
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.dataset.vision_utils import process_image, process_video
 from verl.utils.fs import copy_local_path_from_hdfs
@@ -224,44 +223,18 @@ class MultiTurnSFTDataset(Dataset):
         if enable_thinking is not None:
             apply_chat_template_kwargs["enable_thinking"] = enable_thinking
 
-        try:
-            inputs = processor.apply_chat_template(
-                [message],
-                tools=tools,
-                add_generation_prompt=False,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt",
-                **apply_chat_template_kwargs,
-            )
-        except (jinja2.exceptions.TemplateError, Exception) as e:
-            if "No user query" not in str(e):
-                raise
-            # Chat templates that require a user message (e.g. Qwen3.5) fail
-            # when tokenising a single non-user message. Fallback: tokenise the
-            # conversation up to this turn and subtract the prefix.
-            inputs_full = processor.apply_chat_template(
-                full_message[: index + 1],
-                tools=tools,
-                add_generation_prompt=False,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt",
-                **apply_chat_template_kwargs,
-            )
-            prefix_len = 0
-            if index > 0:
-                inputs_prev = processor.apply_chat_template(
-                    full_message[:index],
-                    tools=tools if index == 1 else None,
-                    add_generation_prompt=False,
-                    tokenize=True,
-                    return_dict=True,
-                    return_tensors="pt",
-                    **apply_chat_template_kwargs,
-                )
-                prefix_len = inputs_prev["input_ids"].shape[-1]
-            inputs = {k: v[..., prefix_len:] for k, v in inputs_full.items()}
+        inputs = apply_chat_template_single_turn(
+            processor,
+            messages=[message],
+            full_conversation=full_message,
+            turn_index=index,
+            tools=tools,
+            add_generation_prompt=False,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            **apply_chat_template_kwargs,
+        )
 
         inputs = dict(inputs)
         input_ids = inputs.pop("input_ids")[0]

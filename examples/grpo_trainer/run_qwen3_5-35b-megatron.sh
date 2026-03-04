@@ -19,8 +19,8 @@
 # Qwen3.5 architecture notes:
 #   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
 #   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
+#     - model.use_remove_padding=False           (deprecated option, will be removed in the future forces bshd compute format)
 #     - actor.megatron.use_remove_padding=False  (forces bshd compute format)
-#     - model.use_remove_padding=True           (keeps NestedTensor in data pipeline)
 #     - actor.use_dynamic_bsz=False              (required for bshd mode)
 #
 #   Once Megatron-LM adds THD support for Qwen3.5 GDN, use_remove_padding
@@ -71,7 +71,7 @@ DATA=(
 MODEL=(
     actor_rollout_ref.model.path=${HF_MODEL_PATH}
     actor_rollout_ref.model.trust_remote_code=True
-    actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.model.use_remove_padding=False
 )
 
 ACTOR=(

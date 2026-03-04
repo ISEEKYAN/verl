@@ -97,11 +97,11 @@ def apply_chat_template_single_turn(
                 tools=prefix_tools,
                 **kwargs,
             )
-            if isinstance(inputs_prev, dict):
+            if hasattr(inputs_prev, "items"):
                 prefix_len = inputs_prev["input_ids"].shape[-1]
             else:
                 prefix_len = len(inputs_prev)
 
-        if isinstance(inputs_full, dict):
+        if hasattr(inputs_full, "items"):
             return {k: v[..., prefix_len:] for k, v in inputs_full.items()}
         return inputs_full[prefix_len:]

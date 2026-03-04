@@ -130,7 +130,7 @@ torchrun \
     data.max_token_len_per_gpu=${MAX_LENGTH} \
     data.messages_key=messages \
     model.path=${MODEL_PATH} \
-    model.use_remove_padding=True \
+    model.use_remove_padding=False \
     model.trust_remote_code=True \
     ${ENGINE_CONFIG} \
     trainer.test_freq=-1 \

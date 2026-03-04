@@ -31,6 +31,7 @@ class SupportedVLM(Enum):
     QWEN3_MOE_VL = "Qwen3VLMoeForConditionalGeneration"
     QWEN3_VL = "Qwen3VLForConditionalGeneration"
     QWEN3_5_MOE_VL = "Qwen3_5MoeForConditionalGeneration"
+    QWEN3_5_VL = "Qwen3_5ForConditionalGeneration"
 
 
 supported_vlm = [member.value for member in SupportedVLM]

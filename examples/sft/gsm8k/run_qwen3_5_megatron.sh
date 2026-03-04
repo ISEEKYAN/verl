@@ -14,7 +14,6 @@
 #   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
 #   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
 #     - engine.use_remove_padding=False  (forces bshd compute format)
-#     - model.use_remove_padding=True    (keeps NestedTensor in data pipeline)
 #     - data.use_dynamic_bsz=False       (required for bshd mode)
 #
 #   Once https://github.com/NVIDIA/Megatron-LM/pull/2644 is merged, THD

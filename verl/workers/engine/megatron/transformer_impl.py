@@ -152,6 +152,10 @@ class MegatronEngine(BaseEngine):
             # In case of invalid overrides, we need to make sure some critical params are set correctly
             provider.params_dtype = self.param_dtype
 
+            # Ensure dtype settings propagate to Megatron-Bridge/TE
+            provider.fp16 = self.param_dtype == torch.float16
+            provider.bf16 = self.param_dtype == torch.bfloat16
+
             # Pass distributed info
             provider.tensor_model_parallel_size = self.engine_config.tensor_model_parallel_size
             provider.pipeline_model_parallel_size = self.engine_config.pipeline_model_parallel_size
@@ -315,6 +319,8 @@ class MegatronEngine(BaseEngine):
         if self.engine_config.forward_only:
             self.optimizer = None
             self.lr_scheduler = None
+            self.to(device="cpu", model=self._is_offload_param, optimizer=False, grad=False)
+            log_gpu_memory_usage("After offload model during init (forward_only)", logger=logger)
             return
 
         self.optimizer = self._build_optimizer()
@@ -598,12 +604,14 @@ class MegatronEngine(BaseEngine):
             return {}
 
     def get_per_tensor_param(self, base_sync_done=False, **kwargs):
-        load_megatron_model_to_gpu(self.module, load_grad=False)
         peft_config = None
         non_merge_lora_sync = self.peft_cls is not None and not self.model_config.lora.get("merge", False)
+        adapter_only = base_sync_done and non_merge_lora_sync
+        # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
+        load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
         if self.vanilla_bridge:
             per_tensor_param = self.bridge.export_weights(self.module)
-        elif base_sync_done and non_merge_lora_sync:
+        elif adapter_only:
             # Only export adapter weights
             peft_config = build_peft_config_for_vllm(self.model_config.lora)
             per_tensor_param = self.bridge.export_adapter_weights(self.module)
@@ -665,15 +673,13 @@ class MegatronEngineWithLMHead(MegatronEngine):
         loss_mask = batch["loss_mask"].to(bool)
         multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
 
-        routed_experts = batch.get("routed_experts", [])
-        attention_mask = batch.get("attention_mask", None)
+        routed_experts = batch.get("routed_experts", None)
 
         return {
             "input_ids": input_ids,
             "loss_mask": loss_mask,
             "multi_modal_inputs": multi_modal_inputs,
             "routed_experts": routed_experts,
-            "attention_mask": attention_mask,
         }
 
     def prepare_model_outputs(self, output: dict, data: TensorDict):
@@ -712,8 +718,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
             layers_topk_idx = model_inputs["routed_experts"]
-            attention_mask = model_inputs["attention_mask"].to(bool)
-            set_router_replay_data(layers_topk_idx, attention_mask, self.tf_config, vp_rank)
+            set_router_replay_data(layers_topk_idx, None, self.tf_config, vp_rank)
 
         if pad_mode == DatasetPadMode.NO_PADDING:
             label = input_ids.clone()

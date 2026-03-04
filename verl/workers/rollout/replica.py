@@ -18,6 +18,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Callable, Optional
 
+import ray
 from omegaconf import DictConfig
 from pydantic import BaseModel
 from ray.actor import ActorHandle
@@ -28,6 +29,11 @@ from verl.utils.device import is_torch_npu_available
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
+
+
+# Max number of concurrent calls to the methods of Rollout,
+# excluding calls to generate method.
+CONTROL_METHOD_CONCURRENCY = 16
 
 
 class TokenOutput(BaseModel):
@@ -91,7 +97,7 @@ class RolloutReplica(ABC):
         is_reward_model: bool = False,
     ) -> None:
         self.replica_rank = replica_rank
-        self.config = omega_conf_to_dataclass(config)
+        self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = model_config
 
         self.world_size = (
@@ -200,10 +206,18 @@ class RolloutReplica(ABC):
         self.workers = worker_group.workers
         await self.launch_servers()
 
-    @abstractmethod
     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
         """Get rollout worker actor class for colocated and standalone mode."""
-        raise NotImplementedError
+        from verl.checkpoint_engine.base import CheckpointEngineWorker
+
+        rollout_worker_actor_cls = ray.remote(CheckpointEngineWorker)
+
+        return RayClassWithInitArgs(
+            cls=rollout_worker_actor_cls,
+            rollout_config=self.config,
+            model_config=self.model_config,
+            replica_rank=self.replica_rank,
+        )
 
     @abstractmethod
     async def launch_servers(self):
@@ -219,6 +233,12 @@ class RolloutReplica(ABC):
     def server_handle(self) -> ActorHandle:
         """Get rollout server handle for Token-in-token-out generation."""
         return self._server_handle
+
+    @property
+    def max_concurrency(self) -> int:
+        # 1000 is Ray's default max_concurrency for async execution.
+        # Add some margin to account for control method call.
+        return max(1000, self.config.max_num_seqs + CONTROL_METHOD_CONCURRENCY)
 
     def rollout_worker_use_gpu(self) -> bool:
         return True

@@ -203,10 +203,7 @@ class MultiTurnSFTDataset(Dataset):
         Returns:
             Tuple of (input_ids, loss_mask, attention_mask, dict[str, torch.Tensor])
         """
-        has_visual_content = isinstance(message.get("content"), list) and any(
-            isinstance(c, dict) and c.get("type") in ("image", "video") for c in message["content"]
-        )
-        processor = self.processor if self.processor is not None and has_visual_content else self.tokenizer
+        processor = self.processor if self.processor is not None else self.tokenizer
         apply_chat_template_kwargs = {**self.apply_chat_template_kwargs}
         if enable_thinking is not None:
             apply_chat_template_kwargs["enable_thinking"] = enable_thinking
@@ -214,8 +211,6 @@ class MultiTurnSFTDataset(Dataset):
         inputs = apply_chat_template_single_turn(
             processor,
             messages=[message],
-            full_conversation=full_message,
-            turn_index=index,
             tools=tools,
             add_generation_prompt=False,
             tokenize=True,
@@ -399,6 +394,8 @@ class MultiTurnSFTDataset(Dataset):
                 res["multi_modal_inputs"] = multi_modal_inputs
             return res
         elif self.pad_mode == DatasetPadMode.NO_PADDING:
+            if sequence_length > self.max_length and self.truncation == "error":
+                raise ValueError(f"{sequence_length=} is larger than {self.max_length=}")
             # truncate input_ids if it is longer than max_length
             if len(input_ids) > self.max_length:
                 input_ids = input_ids[: self.max_length]

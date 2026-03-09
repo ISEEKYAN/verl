@@ -2,6 +2,8 @@
 import logging
 import os
 
+from transformers import PreTrainedTokenizerBase, ProcessorMixin
+
 from verl.utils.tokenizer import normalize_token_ids
 
 logger = logging.getLogger(__name__)
@@ -49,59 +51,76 @@ def extract_system_prompt_and_generation(tokenizer):
 
 
 def apply_chat_template_single_turn(
-    processor,
+    processor: PreTrainedTokenizerBase | ProcessorMixin,
     messages: list[dict],
-    full_conversation: list[dict],
-    turn_index: int,
+    *,
+    tokenize: bool = True,
+    add_generation_prompt: bool = True,
     tools=None,
+    return_dict: bool = False,
+    return_mm_token_type_ids: bool = False,
     **kwargs,
-):
-    """Apply chat_template to a single turn's ``messages``, with automatic
-    fallback for templates that require a user message (e.g. Qwen 3.5's
-    "No user query found" error).
-
-    When the direct call fails, the function tokenises the full conversation up
-    to *turn_index* and subtracts the prefix produced by everything before
-    *turn_index*, yielding only this turn's tokens.
+) -> list[int] | str:
+    """apply_chat_template to a single turn's messages.
 
     Args:
-        processor: tokenizer or processor that has ``apply_chat_template``.
-        messages: the message(s) to tokenise (typically ``[single_msg]``).
-        full_conversation: the complete conversation list for fallback context.
-        turn_index: 0-based position of the **last** message of ``messages``
-            inside ``full_conversation``.
-        tools: tool schemas forwarded to ``apply_chat_template``.
-        **kwargs: extra keyword arguments forwarded to ``apply_chat_template``
-            (e.g. ``add_generation_prompt``, ``return_tensors``, ``tokenize``).
+        processor: tokenizer or processor.
+        messages: list[dict], single turn messages.
+        tokenize: bool, whether to tokenize the output.
+        add_generation_prompt: bool, whether to add generation prompt.
+        tools: list[dict], tools schema.
+        return_dict: bool, whether to return a dict.
+        return_mm_token_type_ids: bool, whether to return multimodal token type ids.
+        **kwargs: additional arguments for apply_chat_template.
 
     Returns:
-        Same type as ``processor.apply_chat_template`` — typically a ``dict``
-        (when ``return_dict=True``) or a ``list[int]``.
+        list[int] | str: tokenized ids or text string.
     """
+    assert isinstance(messages, list) and len(messages) == 1, f"messages must be a single turn, got {messages}"
     try:
-        return processor.apply_chat_template(messages, tools=tools, **kwargs)
-    except Exception as e:
-        if "No user query" not in str(e):
-            raise
-
-        inputs_full = processor.apply_chat_template(
-            full_conversation[: turn_index + 1],
+        return processor.apply_chat_template(
+            messages,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
             tools=tools,
+            return_dict=return_dict,
+            return_mm_token_type_ids=return_mm_token_type_ids,
             **kwargs,
         )
-        prefix_len = 0
-        if turn_index > 0:
-            prefix_tools = tools if turn_index == 1 else None
-            inputs_prev = processor.apply_chat_template(
-                full_conversation[:turn_index],
-                tools=prefix_tools,
-                **kwargs,
-            )
-            if hasattr(inputs_prev, "items"):
-                prefix_len = inputs_prev["input_ids"].shape[-1]
-            else:
-                prefix_len = len(inputs_prev)
+    except Exception:
+        # Qwen3.5 apply_chat_template needs messages with at least one user message
+        dummy_user_message = [{"role": "user", "content": [{"type": "text", "text": ""}]}]
+        dummy_user_prefix = processor.apply_chat_template(
+            dummy_user_message,
+            tokenize=tokenize,
+            add_generation_prompt=False,
+            tools=tools,
+            return_dict=return_dict,
+            return_mm_token_type_ids=return_mm_token_type_ids,
+            **kwargs,
+        )
+        output = processor.apply_chat_template(
+            dummy_user_message + messages,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            return_dict=return_dict,
+            return_mm_token_type_ids=return_mm_token_type_ids,
+            **kwargs,
+        )
 
-        if hasattr(inputs_full, "items"):
-            return {k: v[..., prefix_len:] for k, v in inputs_full.items()}
-        return inputs_full[prefix_len:]
+        if not tokenize:  # tokenize=False
+            return output[len(dummy_user_prefix) :]
+        elif not return_dict:  # tokenize=True and return_dict=False
+            if isinstance(output[0], list):  # transformers>=5
+                assert len(output) == 1, "output must be a list[int] or list[list[int]]"
+                dummy_user_prefix = dummy_user_prefix[0]
+                output = output[0]
+            return output[len(dummy_user_prefix) :]
+        else:  # tokenize=True and return_dict=True and return_tensors="pt"
+            dummy_user_prefix = dict(dummy_user_prefix)
+            output = dict(output)
+            prefix_len = dummy_user_prefix["input_ids"].shape[1]
+            output["input_ids"] = output["input_ids"][:, prefix_len:]
+            output["attention_mask"] = output["attention_mask"][:, prefix_len:]
+            return output

@@ -50,7 +50,7 @@ def extract_system_prompt_and_generation(tokenizer):
     return system_prompt, generate_prompt
 
 
-def apply_chat_template_single_turn(
+def apply_chat_template(
     processor: PreTrainedTokenizerBase | ProcessorMixin,
     messages: list[dict],
     *,
@@ -58,25 +58,23 @@ def apply_chat_template_single_turn(
     add_generation_prompt: bool = True,
     tools=None,
     return_dict: bool = False,
-    return_mm_token_type_ids: bool = False,
     **kwargs,
 ) -> list[int] | str:
-    """apply_chat_template to a single turn's messages.
+    """apply_chat_template to messages with special attention to template requiring
+    at least one user message, e.g. Qwen3.5.
 
     Args:
         processor: tokenizer or processor.
-        messages: list[dict], single turn messages.
+        messages: list[dict], messages.
         tokenize: bool, whether to tokenize the output.
         add_generation_prompt: bool, whether to add generation prompt.
         tools: list[dict], tools schema.
         return_dict: bool, whether to return a dict.
-        return_mm_token_type_ids: bool, whether to return multimodal token type ids.
         **kwargs: additional arguments for apply_chat_template.
 
     Returns:
         list[int] | str: tokenized ids or text string.
     """
-    assert isinstance(messages, list) and len(messages) == 1, f"messages must be a single turn, got {messages}"
     try:
         return processor.apply_chat_template(
             messages,
@@ -84,7 +82,6 @@ def apply_chat_template_single_turn(
             add_generation_prompt=add_generation_prompt,
             tools=tools,
             return_dict=return_dict,
-            return_mm_token_type_ids=return_mm_token_type_ids,
             **kwargs,
         )
     except Exception:
@@ -96,7 +93,6 @@ def apply_chat_template_single_turn(
             add_generation_prompt=False,
             tools=tools,
             return_dict=return_dict,
-            return_mm_token_type_ids=return_mm_token_type_ids,
             **kwargs,
         )
         output = processor.apply_chat_template(
@@ -105,7 +101,6 @@ def apply_chat_template_single_turn(
             add_generation_prompt=add_generation_prompt,
             tools=tools,
             return_dict=return_dict,
-            return_mm_token_type_ids=return_mm_token_type_ids,
             **kwargs,
         )
 
@@ -123,4 +118,6 @@ def apply_chat_template_single_turn(
             prefix_len = dummy_user_prefix["input_ids"].shape[1]
             output["input_ids"] = output["input_ids"][:, prefix_len:]
             output["attention_mask"] = output["attention_mask"][:, prefix_len:]
+            if "mm_token_type_ids" in output:
+                output["mm_token_type_ids"] = output["mm_token_type_ids"][:, prefix_len:]
             return output

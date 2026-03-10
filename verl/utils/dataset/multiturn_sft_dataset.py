@@ -32,7 +32,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.models.transformers.qwen2_vl import get_rope_index
 from verl.utils import hf_tokenizer
-from verl.utils.chat_template import apply_chat_template_single_turn, extract_system_prompt_and_generation
+from verl.utils.chat_template import apply_chat_template, extract_system_prompt_and_generation
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.dataset.vision_utils import process_image, process_video
 from verl.utils.fs import copy_local_path_from_hdfs
@@ -208,7 +208,7 @@ class MultiTurnSFTDataset(Dataset):
         if enable_thinking is not None:
             apply_chat_template_kwargs["enable_thinking"] = enable_thinking
 
-        inputs = apply_chat_template_single_turn(
+        inputs = apply_chat_template(
             processor,
             messages=[message],
             tools=tools,

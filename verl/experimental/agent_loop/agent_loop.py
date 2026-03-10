@@ -727,7 +727,7 @@ class AgentLoopWorker:
         if self.processor is None:
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
-        # For transformers>=5.0.0, mm_token_type_ids is only used to calculate position ids.
+        # For transformers>=5.3.0, mm_token_type_ids is only used to calculate position ids.
         if multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
             multi_modal_inputs = multi_modal_inputs.copy()
             mm_token_type_ids = torch.zeros_like(input_ids)

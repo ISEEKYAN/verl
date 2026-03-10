@@ -259,7 +259,7 @@ class ToolAgentLoop(AgentLoopBase):
             return AgentState.TERMINATED
 
         # Extract tool calls
-        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids)
+        _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, self.tool_schemas)
 
         # Handle interaction if needed
         if self.interaction_config_file:

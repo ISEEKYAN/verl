@@ -34,7 +34,7 @@ from verl.experimental.agent_loop.prometheus_utils import update_prometheus_conf
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
-from verl.utils.chat_template import initialize_system_prompt
+from verl.utils.chat_template import apply_chat_template_single_turn, initialize_system_prompt
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
@@ -307,18 +307,12 @@ class AgentLoopBase(ABC):
 
         Returns:
             list[int]: Prompt token ids.
-
-        .. todo::
-            Templates that require a user message (e.g. Qwen 3.5) will fail
-            when *messages* contains only tool/assistant turns.  Migrate to
-            :func:`verl.utils.chat_template.apply_chat_template_single_turn`
-            with ``full_conversation`` fallback — see the SFT dataset for the
-            reference pattern.
         """
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(
                 None,
-                lambda: self.processor.apply_chat_template(
+                lambda: apply_chat_template_single_turn(
+                    self.processor,
                     messages,
                     tools=tools,
                     add_generation_prompt=True,
@@ -346,7 +340,8 @@ class AgentLoopBase(ABC):
         else:
             tokenized_prompt = await self.loop.run_in_executor(
                 None,
-                lambda: self.tokenizer.apply_chat_template(
+                lambda: apply_chat_template_single_turn(
+                    self.tokenizer,
                     messages,
                     tools=tools,
                     add_generation_prompt=True,

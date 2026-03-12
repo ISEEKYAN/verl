@@ -39,9 +39,9 @@ custom_model_prefix = Path("~/models").expanduser().resolve()
 @pytest.mark.parametrize(
     "model_path, ignore_input_ids_mismatch",
     [
-        ("{custom_model_prefix}/Qwen/Qwen2.5-0.5B", False),
-        ("{custom_model_prefix}/Qwen/Qwen3-0.6B", True),
-        ("{custom_model_prefix}/Qwen/Qwen3.5-0.8B", False),
+        (f"{custom_model_prefix}/Qwen/Qwen2.5-0.5B", False),
+        (f"{custom_model_prefix}/Qwen/Qwen3-0.6B", True),
+        (f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B", False),
     ],
 )
 def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool):
@@ -342,8 +342,8 @@ def vlm_data_file():
 @pytest.mark.parametrize(
     "model_path",
     [
-        "{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
-        "{custom_model_prefix}/Qwen/Qwen3.5-0.8B",
+        f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
+        f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B",
     ],
 )
 def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
@@ -404,8 +404,8 @@ def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
 @pytest.mark.parametrize(
     "model_path",
     [
-        "{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
-        "{custom_model_prefix}/Qwen/Qwen3.5-0.8B",
+        f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
+        f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B",
     ],
 )
 def test_multiturn_sft_vlm_dataloader_on_cpu(model_path, vlm_data_file):

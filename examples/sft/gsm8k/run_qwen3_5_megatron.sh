@@ -8,7 +8,7 @@
 #       pip install --upgrade transformers
 #       pip install flash-linear-attention
 #       pip install -U git+https://github.com/ISEEKYAN/mbridge.git
-#   - Megatron-LM dev branch with Qwen3.5 GDN support
+#   - Megatron-LM==0.16.0
 #
 # Qwen3.5 architecture notes:
 #   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does

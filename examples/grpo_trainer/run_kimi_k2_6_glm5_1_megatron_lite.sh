@@ -13,13 +13,18 @@
 #   - kimi_k2_6: 32 nodes, PP8 EP8 CP8, fsdp2
 #   - glm5_1:    32 nodes, PP8 EP8 CP8, fsdp2
 #
+# GLM 5.1 uses fused DSA kernels on Hopper and Blackwell GPUs. The critical
+# DSA-only dependencies are nvidia-cutlass-dsl==4.5.2 and nvidia-cudnn-frontend.
+# cudnn-frontend release 1.24.1 is sufficient for Blackwell, while Hopper still
+# needs a develop-branch build with IndexerForwardSm90 support.
+#
 # Mesh accounting follows Megatron Lite's per-pipeline-stage layout:
 #   ngpu / pp = tp * ep * dp = etp * ep * edp
 # With the default 256 GPUs, PP8, EP8, TP1, and ETP1, this gives DP=4 and EDP=4.
 #
 # OPTIMIZER selects the Megatron Lite optimizer path:
 #   - fsdp2:    Megatron Lite FSDP2 wrapper, lower memory pressure, default
-#   - dist_opt: vanilla Megatron distributed optimizer
+#   - dist_opt: original Megatron distributed optimizer
 # When using dist_opt, prefer a larger PP*EP mesh to reduce per-rank model and
 # optimizer memory pressure and avoid OOM.
 

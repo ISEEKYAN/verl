@@ -23,7 +23,7 @@
 #
 # OPTIMIZER selects the Megatron Lite optimizer path:
 #   - fsdp2:    Megatron Lite FSDP2 wrapper, lower memory pressure, default
-#   - dist_opt: vanilla Megatron distributed optimizer
+#   - dist_opt: original Megatron distributed optimizer
 # When using dist_opt, prefer a larger PP*EP mesh to reduce per-rank model and
 # optimizer memory pressure and avoid OOM.
 

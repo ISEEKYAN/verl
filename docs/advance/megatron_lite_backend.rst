@@ -3,10 +3,25 @@ Megatron Lite backend
 
 Last updated: 06/17/2026.
 
-Megatron Lite (``mlite``) is an experimental Megatron-family training backend
-for verl. It keeps the backend glue outside the verl tree: the ``mlite``
-checkout provides ``megatron.lite`` and the ``verl_mlite`` launcher/config
-package used by the example scripts in this repository.
+Megatron Lite (``mlite``) is Megatron's experimental, agent-friendly training
+path for work that needs to move quickly. It is optimized for fast iteration,
+small reviewable changes, and agentic development: model/runtime code can be
+changed without touching unrelated Megatron subsystems, and new experiments can
+live in their own source checkout instead of being copied into the verl tree.
+
+The verl integration intentionally keeps the backend glue outside this
+repository. The ``mlite`` checkout provides ``megatron.lite`` and the
+``verl_mlite`` launcher/config package used by the example scripts here. Put
+custom extensions in your own code path, add that path through ``MLITE_ROOT`` or
+``PYTHONPATH``, and keep verl focused on orchestration. See the upstream
+Megatron Lite path at
+`NVIDIA/Megatron-LM experimental/lite <https://github.com/NVIDIA/Megatron-LM/tree/dev/experimental/lite>`_.
+
+For the ``dist_opt`` optimizer path, Megatron Lite is intended to preserve
+Megatron-Core behavior rather than trade correctness for flexibility. In
+deterministic runs, the ``mlite`` path has been validated against the
+Megatron-Core distributed optimizer path with bitwise-aligned loss and gradient
+norms, and its step time / throughput are also aligned with the Core path.
 
 Install the backend
 -------------------
@@ -51,9 +66,8 @@ recompute, and ``fsdp2``.
 DeepSeek-V4 DSA note
 --------------------
 
-DeepSeek-V4 uses fused DSA kernels and is intended for the H100 GPU path. In
-addition to the normal verl runtime, the critical DSA-only dependencies are
-``nvidia-cutlass-dsl==4.5.2`` and a develop-branch
-``nvidia-cudnn-frontend`` build that includes ``IndexerForwardSm90`` support.
-The ``nvidia-cudnn-frontend`` 1.24.1 release does not provide the required SM90
-DSA indexer.
+DeepSeek-V4 uses fused DSA kernels on Hopper and Blackwell GPUs. In addition to
+the normal verl runtime, the critical DSA-only dependencies are
+``nvidia-cutlass-dsl==4.5.2`` and ``nvidia-cudnn-frontend``. The
+``nvidia-cudnn-frontend`` 1.24.1 release is sufficient for Blackwell, while
+Hopper still needs a develop-branch build with ``IndexerForwardSm90`` support.

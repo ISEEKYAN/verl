@@ -1,30 +1,68 @@
 #!/usr/bin/env bash
 # GRPO scale demo | DeepSeek-V4 | vLLM rollout | Megatron Lite training | GPU
 #
-# Megatron Lite's mainline target is Megatron-LM's dev branch, while active
-# development happens on https://github.com/ISEEKYAN/mlite before upstreaming.
-# That checkout provides both megatron.lite and the verl_mlite backend glue:
+# Megatron Lite is Megatron's agentic experimental path. Its mainline target is
+# Megatron-LM's dev branch, while active development happens on
+# https://github.com/ISEEKYAN/mlite before upstreaming. That checkout provides
+# both megatron.lite and the verl_mlite backend glue:
 #
 #   git clone https://github.com/ISEEKYAN/mlite
 #   pip install -e mlite/experimental/lite/examples/verl
 #
-# DeepSeek-V4 uses fused DSA kernels on H100. The critical DSA-only dependencies
-# are nvidia-cutlass-dsl==4.5.2 and a develop-branch nvidia-cudnn-frontend build
-# with IndexerForwardSm90 support; release 1.24.1 is not sufficient.
+# DeepSeek-V4 uses fused DSA kernels on Hopper and Blackwell GPUs. The critical
+# DSA-only dependencies are nvidia-cutlass-dsl==4.5.2 and nvidia-cudnn-frontend.
+# cudnn-frontend release 1.24.1 is sufficient for Blackwell, while Hopper still
+# needs a develop-branch build with IndexerForwardSm90 support.
+#
+# MODEL_VARIANT selects the DeepSeek-V4 target and its default mlite mesh:
+#   - flash: 16 nodes, PP4 EP8  CP4
+#   - pro:   64 nodes, PP8 EP16 CP4
+#
+# DS4 is fixed to TP1/ETP1. The architecture does not support TP/ETP
+# sharding, and there is no plan to support it.
 #
 # OPTIMIZER selects the Megatron Lite optimizer path:
+#   - fsdp2:    Megatron Lite FSDP2 wrapper, lower memory pressure, default
 #   - dist_opt: vanilla Megatron distributed optimizer
-#   - fsdp2: Megatron Lite FSDP2 wrapper, lower memory pressure, default
+# When using dist_opt, prefer a larger PP*EP mesh to reduce per-rank model and
+# optimizer memory pressure and avoid OOM.
 
 set -xeuo pipefail
 
-########################### user-adjustable ###########################
+########################### mlite backend knobs ###########################
+MODEL_VARIANT=${MODEL_VARIANT:-flash}
 MLITE_ROOT=${MLITE_ROOT:-$HOME/mlite}
 MLITE_VERL_ROOT=${MLITE_VERL_ROOT:-${MLITE_ROOT}/experimental/lite/examples/verl}
 MLITE_LITE_ROOT=${MLITE_LITE_ROOT:-${MLITE_ROOT}/experimental/lite}
-MODEL_PATH=${MODEL_PATH:?set MODEL_PATH to the DeepSeek-V4 HF checkpoint}
 
-NNODES=${NNODES:-16}
+OPTIMIZER=${OPTIMIZER:-fsdp2} # dist_opt
+ALL_OFFLOAD=${ALL_OFFLOAD:-True}
+
+case "${MODEL_VARIANT}" in
+    flash)
+        MODEL_PATH=${MODEL_PATH:-${FLASH_MODEL_PATH:-}}
+        NNODES=${NNODES:-16}
+        PP=${PP:-4}
+        EP=${EP:-8}
+        CP=${CP:-4}
+        ;;
+    pro)
+        MODEL_PATH=${MODEL_PATH:-${PRO_MODEL_PATH:-}}
+        NNODES=${NNODES:-64}
+        PP=${PP:-8}
+        EP=${EP:-16}
+        CP=${CP:-4}
+        ;;
+    *)
+        echo "Unsupported MODEL_VARIANT=${MODEL_VARIANT}. Expected flash or pro." >&2
+        exit 1
+        ;;
+esac
+
+: "${MODEL_PATH:?set MODEL_PATH, or set FLASH_MODEL_PATH/PRO_MODEL_PATH for MODEL_VARIANT=${MODEL_VARIANT}}"
+########################### end mlite backend knobs ###########################
+
+########################### user-adjustable ###########################
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-8}
 
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/gsm8k/train.parquet}
@@ -41,21 +79,13 @@ CLIP_RATIO_HIGH=${CLIP_RATIO_HIGH:-0.28}
 CLIP_RATIO_C=${CLIP_RATIO_C:-10.0}
 ENTROPY_COEFF=${ENTROPY_COEFF:-0}
 
-ACTOR_TP=${ACTOR_TP:-1}
-ACTOR_PP=${ACTOR_PP:-4}
-ACTOR_EP=${ACTOR_EP:-8}
-ACTOR_CP=${ACTOR_CP:-4}
-ACTOR_ETP=${ACTOR_ETP:-1}
-OPTIMIZER=${OPTIMIZER:-fsdp2}
-ALL_OFFLOAD=${ALL_OFFLOAD:-True}
-
 ROLLOUT_TP=${ROLLOUT_TP:-2}
-ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.6}
+ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.8}
 ROLLOUT_N=${ROLLOUT_N:-16}
 
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
-PROJECT_NAME=${PROJECT_NAME:-verl-mlite-deepseek_v4-grpo}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-deepseek_v4_grpo_${OPTIMIZER}}
+PROJECT_NAME=${PROJECT_NAME:-verl-mlite-deepseek_v4_${MODEL_VARIANT}-grpo}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-deepseek_v4_${MODEL_VARIANT}_grpo_${OPTIMIZER}}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
@@ -104,12 +134,12 @@ ACTOR=(
     actor_rollout_ref.actor.clip_ratio_high=${CLIP_RATIO_HIGH}
     actor_rollout_ref.actor.clip_ratio_c=${CLIP_RATIO_C}
     actor_rollout_ref.actor.loss_agg_mode=token-mean
-    actor_rollout_ref.actor.engine.tp=${ACTOR_TP}
-    actor_rollout_ref.actor.engine.pp=${ACTOR_PP}
+    actor_rollout_ref.actor.engine.tp=1
+    actor_rollout_ref.actor.engine.pp=${PP}
     actor_rollout_ref.actor.engine.vpp=1
-    actor_rollout_ref.actor.engine.ep=${ACTOR_EP}
-    actor_rollout_ref.actor.engine.cp=${ACTOR_CP}
-    actor_rollout_ref.actor.engine.etp=${ACTOR_ETP}
+    actor_rollout_ref.actor.engine.ep=${EP}
+    actor_rollout_ref.actor.engine.cp=${CP}
+    actor_rollout_ref.actor.engine.etp=1
     actor_rollout_ref.actor.engine.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.engine.optimizer_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.engine.grad_offload=${ALL_OFFLOAD}

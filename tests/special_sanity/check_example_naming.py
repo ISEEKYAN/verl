@@ -103,6 +103,12 @@ DEFAULT_IGNORE_FILES = (
     # folding ``_multi_rs`` into a ROLLOUT_SERVER env-var toggle rather than
     # in this PR.
     "examples/rollout_correction/run_qwen2_5_7b_fsdp_multi_rs.sh",
+    # Megatron Lite launchers intentionally use the ``_megatron_lite`` suffix
+    # to distinguish the external ``megatron.lite`` / ``verl_mlite`` path from
+    # the legacy Megatron backend examples.
+    "examples/grpo_trainer/run_deepseek_v4_megatron_lite.sh",
+    "examples/grpo_trainer/run_kimi_k2_6_glm5_1_megatron_lite.sh",
+    "examples/grpo_trainer/run_qwen3_5_35b_megatron_lite.sh",
 )
 
 

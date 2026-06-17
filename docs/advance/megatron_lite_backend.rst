@@ -56,12 +56,19 @@ rollout where applicable:
    MODEL_PATH=/path/to/deepseek-v4 \
    MLITE_ROOT=/path/to/mlite \
    OPTIMIZER=fsdp2 \
-   bash examples/grpo_trainer/run_deepseek_v4_megatron.sh
+   bash examples/grpo_trainer/run_deepseek_v4_megatron_lite.sh
 
 ``OPTIMIZER`` accepts ``dist_opt`` for the vanilla Megatron distributed
 optimizer and ``fsdp2`` for the Megatron Lite FSDP2 wrapper. The DeepSeek-V4
 launchers default to a 128-GPU mesh with PP4, EP8, CP4, full activation
 recompute, and ``fsdp2``.
+
+Further reading
+---------------
+
+For a practical discussion of long-sequence MoE RL tuning with Megatron Lite,
+including memory, recompute, communication overlap, and FSDP2 trade-offs, see
+`Making Long-Context MoE RL Training Easier to Tune <https://iseekyan.github.io/posts/qwen35-long-sequence-moe-rl/>`_.
 
 DeepSeek-V4 DSA note
 --------------------

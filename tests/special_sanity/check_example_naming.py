@@ -19,8 +19,8 @@ The current convention (see ``examples/README.md``) is::
     run_<model>_<train-backend>.sh
 
 Where ``<train-backend>`` is one of ``fsdp``, ``fsdp2``, ``megatron``,
-``mindspeed``, ``automodel`` or ``veomni``, and **must be the last
-underscore-separated token before** ``.sh`` — nothing follows it. The legacy
+``megatron_lite``, ``mindspeed``, ``automodel`` or ``veomni``, and **must be
+the final suffix before** ``.sh`` — nothing follows it. The legacy
 convention used to embed the inference backend (``vllm``/``sglang``/``trtllm``),
 platform tokens (``_npu``/``_amd``), machine-type tokens (``_gb200``,
 ``_blackwell``), quantization variants (``_fp8``), and ad-hoc trailing
@@ -66,13 +66,15 @@ FORBIDDEN_TOKENS = (
 )
 
 # Recognised train-backend / engine markers. The filename must end with
-# ``_<one of these>.sh`` (i.e. the train-backend is the LAST underscore-
-# separated token). Generation-only scripts that do not run a trainer are
-# listed in ``DEFAULT_IGNORE_FILES`` instead.
+# ``_<one of these>.sh``. Some backends, such as ``megatron_lite``, contain an
+# underscore; validate the full suffix rather than only the last token.
+# Generation-only scripts that do not run a trainer are listed in
+# ``DEFAULT_IGNORE_FILES`` instead.
 ALLOWED_BACKENDS = (
     "fsdp",
     "fsdp2",
     "megatron",
+    "megatron_lite",
     "mindspeed",
     "automodel",
     "veomni",
@@ -103,12 +105,6 @@ DEFAULT_IGNORE_FILES = (
     # folding ``_multi_rs`` into a ROLLOUT_SERVER env-var toggle rather than
     # in this PR.
     "examples/rollout_correction/run_qwen2_5_7b_fsdp_multi_rs.sh",
-    # Megatron Lite launchers intentionally use the ``_megatron_lite`` suffix
-    # to distinguish the external ``megatron.lite`` / ``verl_mlite`` path from
-    # the legacy Megatron backend examples.
-    "examples/grpo_trainer/run_deepseek_v4_megatron_lite.sh",
-    "examples/grpo_trainer/run_kimi_k2_6_glm5_1_megatron_lite.sh",
-    "examples/grpo_trainer/run_qwen3_5_35b_megatron_lite.sh",
 )
 
 
@@ -118,6 +114,11 @@ def _split_tokens(stem: str) -> list[str]:
     if parts and parts[0] == "run":
         parts = parts[1:]
     return parts
+
+
+def _has_allowed_backend(stem: str) -> bool:
+    """Return whether ``stem`` ends with one of the allowed backend suffixes."""
+    return any(stem.endswith(f"_{backend}") for backend in ALLOWED_BACKENDS)
 
 
 def _is_ignored(path: Path, repo_root: Path, ignore_dirs: tuple[str, ...], ignore_files: tuple[str, ...]) -> bool:
@@ -159,7 +160,7 @@ def check_filename(path: Path, display: str | None = None) -> list[str]:
             f"the script, not embedded in the filename."
         )
 
-    if not tokens or tokens[-1] not in ALLOWED_BACKENDS:
+    if not tokens or not _has_allowed_backend(path.stem):
         errors.append(
             f"{shown}: filename must end with '_<train-backend>.sh' where "
             f"train-backend ∈ {list(ALLOWED_BACKENDS)} "

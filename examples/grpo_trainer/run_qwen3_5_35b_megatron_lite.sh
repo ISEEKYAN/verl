@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # GRPO scale demo | Qwen3.5-35B-A3B | vLLM rollout | Megatron Lite training | GPU
 #
-# Megatron Lite is Megatron's agentic experimental path. Its mainline target is
-# Megatron-LM's dev branch, while active development happens on
-# https://github.com/ISEEKYAN/mlite before upstreaming. That checkout provides
-# both megatron.lite and the verl_mlite backend glue:
+# Megatron Lite is Megatron's agentic experimental path. Its upstream home is
+# Megatron-LM's dev branch:
+# https://github.com/NVIDIA/Megatron-LM/tree/dev/experimental/lite
+#
+# This launcher currently tracks the submitter's active branch until the latest
+# mlite changes merge upstream. That checkout provides both megatron.lite and
+# the verl_mlite backend glue:
 #
 #   git clone https://github.com/ISEEKYAN/mlite
 #   pip install -e mlite/experimental/lite/examples/verl

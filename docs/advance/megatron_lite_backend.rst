@@ -26,12 +26,13 @@ norms, and its step time / throughput are also aligned with the Core path.
 Install the backend
 -------------------
 
-Clone the active Megatron Lite checkout and install its verl integration:
+Clone Megatron-LM's upstream ``dev`` branch and install its Megatron Lite verl
+integration:
 
 .. code-block:: bash
 
-   git clone https://github.com/ISEEKYAN/mlite
-   pip install -e mlite/experimental/lite/examples/verl
+   git clone -b dev https://github.com/NVIDIA/Megatron-LM.git
+   pip install -e Megatron-LM/experimental/lite/examples/verl
 
 Alternatively, keep the checkout outside the Python environment and set
 ``MLITE_ROOT`` when running a launcher. The scripts add both
@@ -49,7 +50,7 @@ rollout where applicable:
    MODEL_PATH=/path/to/deepseek-v4 \
    MLITE_ROOT=/path/to/mlite \
    OPTIMIZER=fsdp2 \
-   bash examples/sft/gsm8k/run_deepseek_v4_megatron.sh
+   bash examples/sft/gsm8k/run_deepseek_v4_megatron_lite.sh
 
 .. code-block:: bash
 

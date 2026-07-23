@@ -281,6 +281,8 @@ run_sft_arm() {
       "optim.muon_tp_mode=${MUON_TP_MODE:-blockwise}"
       "optim.muon_scalar_optimizer=${MUON_SCALAR_OPT:-adam}"
       "optim.muon_num_ns_steps=${MUON_NS_STEPS:-5}"
+      # Fair A/B vs AdamW: shard Muon optimizer state across DP ranks (Megatron emerging path).
+      optim.use_layer_wise_distributed_optimizer=True
     )
   fi
 

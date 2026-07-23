@@ -145,6 +145,10 @@ export NCCL_NVLS_ENABLE=0
 export HYDRA_FULL_ERROR=1
 export VERL_SFT_LOGGING_LEVEL=INFO
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Per-job cache on lustre (avoid /root/.triton stale handles across sequential torchrun arms).
+export TRITON_CACHE_DIR="${RUN_ROOT}/.triton_cache"
+export XDG_CACHE_HOME="${RUN_ROOT}/.xdg_cache"
+mkdir -p "${TRITON_CACHE_DIR}" "${XDG_CACHE_HOME}"
 
 # Activate nvrx-only venv (nvidia_resiliency_ext 0.6.0) before PYTHONPATH assembly.
 source "${NVRX_VENV}/bin/activate"
@@ -367,7 +371,10 @@ for ((i = 0; i < ${#ARM_LIST[@]}; i++)); do
   wait_all_nodes_arm_barrier "${arm}"
   if (( i + 1 < ${#ARM_LIST[@]} )); then
     # NCCL teardown + CUDA cache release before the next arm (reduces stale-handle flakes).
-    sleep 30
+    echo "=== [node${NODE_RANK}] inter-arm cleanup before next arm ==="
+    sync || true
+    sleep 60
+    rm -rf "${TRITON_CACHE_DIR}"/* 2>/dev/null || true
     python - <<'PY' || true
 import gc
 try:

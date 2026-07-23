@@ -29,8 +29,9 @@
 
 set -euo pipefail
 
-# Avoid accidental subset runs: generic ARMS/OPTIMIZER may leak from login-shell env via --export=ALL.
-unset ARMS OPTIMIZER
+# Avoid accidental subset runs: env vars may leak from login-shell via --export=ALL.
+# MUON_SFT_ARMS leaked as [adam] in job 14272863 — unset all legacy/subset names.
+unset ARMS OPTIMIZER MUON_SFT_ARMS SFT_AB_ARMS
 
 ########################### paths (proven muon snapshot) ###########################
 B=/lustre/fs1/portfolios/coreai/projects/coreai_devtech_all/users/bayan
@@ -123,7 +124,7 @@ if [[ "${IN_MUON_SFT_30B_CONTAINER:-0}" != "1" ]]; then
   export MLITE_ROOT MEGATRON_ROOT EMERGING_OPT_ROOT MBRIDGE_ROOT NVRX_VENV NVRX_SITE
   export MODEL_PATH DATA_DIR RUN_ROOT MAX_STEPS LR MINLR
   export TRAIN_BATCH_SIZE MICRO_BATCH_SIZE MAX_TOKEN_LEN
-  export TP PP EP CP ETP GPUS_PER_NODE NNODES MASTER_PORT MASTER_ADDR MUON_SFT_ARMS
+  export TP PP EP CP ETP GPUS_PER_NODE NNODES MASTER_PORT MASTER_ADDR SFT_AB_ARMS_OVERRIDE
   exec srun --export=ALL \
     --nodes="${SLURM_NNODES}" \
     --ntasks="${SLURM_NNODES}" \
@@ -330,22 +331,27 @@ run_sft_arm() {
 }
 
 ########################### A/B arms (both nodes run identical loop; torchrun syncs ranks) ###########################
-# MUON_SFT_ARMS: comma-separated subset, e.g. MUON_SFT_ARMS=adam to rerun one arm only.
-MUON_SFT_ARMS=${MUON_SFT_ARMS:-muon,adam}
-IFS=',' read -r -a ARM_LIST <<< "${MUON_SFT_ARMS}"
+# Default is always muon+adam. Subset reruns only via explicit sbatch --export=SFT_AB_ARMS_OVERRIDE=muon
+# (never read MUON_SFT_ARMS / SFT_AB_ARMS from ambient env — they leaked via --export=ALL in job 14272863).
+if [[ -n "${SFT_AB_ARMS_OVERRIDE:-}" ]]; then
+  SFT_AB_ARMS="${SFT_AB_ARMS_OVERRIDE}"
+else
+  SFT_AB_ARMS="muon,adam"
+fi
+IFS=',' read -r -a ARM_LIST <<< "${SFT_AB_ARMS}"
 
 for arm in "${ARM_LIST[@]}"; do
   case "${arm}" in
     muon | adam) ;;
     *)
-      echo "FATAL: invalid arm '${arm}' in MUON_SFT_ARMS=${MUON_SFT_ARMS} (allowed: muon, adam)" >&2
+      echo "FATAL: invalid arm '${arm}' in SFT_AB_ARMS=${SFT_AB_ARMS} (allowed: muon, adam)" >&2
       exit 6
       ;;
   esac
 done
 
 if [[ "${NODE_RANK}" == "0" ]]; then
-  echo "=== A/B protocol MUON_SFT_ARMS=[${MUON_SFT_ARMS}] count=${#ARM_LIST[@]}; extract json['data']['train/loss'] + perf/max_memory_* ==="
+  echo "=== A/B protocol SFT_AB_ARMS=[${SFT_AB_ARMS}] count=${#ARM_LIST[@]}; extract json['data']['train/loss'] + perf/max_memory_* ==="
 fi
 
 wait_all_nodes_arm_barrier() {

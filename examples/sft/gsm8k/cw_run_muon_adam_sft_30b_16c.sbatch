@@ -29,6 +29,9 @@
 
 set -euo pipefail
 
+# Avoid accidental subset runs: generic ARMS/OPTIMIZER may leak from login-shell env via --export=ALL.
+unset ARMS OPTIMIZER
+
 ########################### paths (proven muon snapshot) ###########################
 B=/lustre/fs1/portfolios/coreai/projects/coreai_devtech_all/users/bayan
 CODE_ROOT=${CODE_ROOT:-${B}/code}
@@ -120,7 +123,7 @@ if [[ "${IN_MUON_SFT_30B_CONTAINER:-0}" != "1" ]]; then
   export MLITE_ROOT MEGATRON_ROOT EMERGING_OPT_ROOT MBRIDGE_ROOT NVRX_VENV NVRX_SITE
   export MODEL_PATH DATA_DIR RUN_ROOT MAX_STEPS LR MINLR
   export TRAIN_BATCH_SIZE MICRO_BATCH_SIZE MAX_TOKEN_LEN
-  export TP PP EP CP ETP GPUS_PER_NODE NNODES MASTER_PORT MASTER_ADDR
+  export TP PP EP CP ETP GPUS_PER_NODE NNODES MASTER_PORT MASTER_ADDR MUON_SFT_ARMS
   exec srun --export=ALL \
     --nodes="${SLURM_NNODES}" \
     --ntasks="${SLURM_NNODES}" \
@@ -248,12 +251,13 @@ fi
 ########################### launch helper ###########################
 run_sft_arm() {
   local optimizer="$1"
+  local arm_port="$2"
   local exp_name="gsm8k-sft-30b-${optimizer}"
   local save_path="${RUN_ROOT}/${exp_name}"
   mkdir -p "${save_path}"
   export VERL_FILE_LOGGER_ROOT="${save_path}"
 
-  echo "=== [node${NODE_RANK}] SFT arm optimizer=${optimizer} save=${save_path} ==="
+  echo "=== [node${NODE_RANK}] SFT arm optimizer=${optimizer} port=${arm_port} save=${save_path} exp=${exp_name} ==="
 
   local -a optim_args=(
     optim=megatron
@@ -280,7 +284,7 @@ run_sft_arm() {
     --nproc_per_node="${GPUS_PER_NODE}" \
     --node_rank="${NODE_RANK}" \
     --master_addr="${MASTER_ADDR}" \
-    --master_port="${MASTER_PORT}" \
+    --master_port="${arm_port}" \
     -m verl.trainer.sft_trainer \
     "data.train_files=${DATA_DIR}/train.parquet" \
     "data.val_files=${DATA_DIR}/test.parquet" \
@@ -312,7 +316,7 @@ run_sft_arm() {
     "+engine.override_transformer_config.recompute_num_layers=1" \
     "+engine.override_transformer_config.apply_rope_fusion=True" \
     "trainer.default_local_dir=${save_path}" \
-    trainer.project_name=gsm8k-muon-sft-30b \
+    "trainer.project_name=gsm8k-sft-30b-${optimizer}" \
     "trainer.experiment_name=${exp_name}" \
     "trainer.logger=[console,file]" \
     trainer.total_epochs=1 \
@@ -321,18 +325,46 @@ run_sft_arm() {
     trainer.save_freq=-1
 }
 
-########################### A/B arms (node0 orchestrates order) ###########################
-# ARMS: comma-separated subset, e.g. ARMS=adam to rerun baseline only after a transient failure.
-ARMS=${ARMS:-muon,adam}
-IFS=',' read -r -a ARM_LIST <<< "${ARMS}"
+########################### A/B arms (both nodes run identical loop; torchrun syncs ranks) ###########################
+# MUON_SFT_ARMS: comma-separated subset, e.g. MUON_SFT_ARMS=adam to rerun one arm only.
+MUON_SFT_ARMS=${MUON_SFT_ARMS:-muon,adam}
+IFS=',' read -r -a ARM_LIST <<< "${MUON_SFT_ARMS}"
+
+for arm in "${ARM_LIST[@]}"; do
+  case "${arm}" in
+    muon | adam) ;;
+    *)
+      echo "FATAL: invalid arm '${arm}' in MUON_SFT_ARMS=${MUON_SFT_ARMS} (allowed: muon, adam)" >&2
+      exit 6
+      ;;
+  esac
+done
 
 if [[ "${NODE_RANK}" == "0" ]]; then
-  echo "=== A/B protocol arms=[${ARMS}]; extract json['data']['train/loss'] + perf/max_memory_* ==="
+  echo "=== A/B protocol MUON_SFT_ARMS=[${MUON_SFT_ARMS}] count=${#ARM_LIST[@]}; extract json['data']['train/loss'] + perf/max_memory_* ==="
 fi
+
+wait_all_nodes_arm_barrier() {
+  local arm="$1"
+  local marker="${RUN_ROOT}/.arm_${arm}_node${NODE_RANK}_done"
+  touch "${marker}"
+  for _ in $(seq 1 120); do
+    local ready=1
+    for ((n = 0; n < NNODES; n++)); do
+      [[ -f "${RUN_ROOT}/.arm_${arm}_node${n}_done" ]] || ready=0
+    done
+    (( ready )) && return 0
+    sleep 5
+  done
+  echo "FATAL: timed out waiting for arm=${arm} barrier on all ${NNODES} nodes" >&2
+  exit 7
+}
 
 for ((i = 0; i < ${#ARM_LIST[@]}; i++)); do
   arm="${ARM_LIST[$i]}"
-  run_sft_arm "${arm}"
+  arm_port=$((MASTER_PORT + i))
+  run_sft_arm "${arm}" "${arm_port}"
+  wait_all_nodes_arm_barrier "${arm}"
   if (( i + 1 < ${#ARM_LIST[@]} )); then
     # NCCL teardown + CUDA cache release before the next arm (reduces stale-handle flakes).
     sleep 30
@@ -352,6 +384,22 @@ done
 
 if [[ "${NODE_RANK}" == "0" ]]; then
   echo "=== DONE job=${SLURM_JOB_ID} outputs under ${RUN_ROOT} ==="
+  for arm in "${ARM_LIST[@]}"; do
+    jsonl="$(find "${RUN_ROOT}/gsm8k-sft-30b-${arm}" -name "gsm8k-sft-30b-${arm}.jsonl" -print -quit 2>/dev/null || true)"
+    if [[ -z "${jsonl}" || ! -f "${jsonl}" ]]; then
+      echo "FATAL: missing jsonl for arm=${arm} under ${RUN_ROOT}/gsm8k-sft-30b-${arm}" >&2
+      exit 8
+    fi
+    echo "arm=${arm} jsonl=${jsonl}"
+    python - <<PY
+import json
+path = "${jsonl}"
+rows = [json.loads(l) for l in open(path)]
+losses = [(r.get("step"), r.get("data", {}).get("train/loss")) for r in rows if "train/loss" in r.get("data", {})]
+mem = max((r.get("data", {}).get("perf/max_memory_allocated_gb") or 0) for r in rows)
+print(f"  steps={len(losses)} first_loss={losses[0][1] if losses else None} last_loss={losses[-1][1] if losses else None} peak_alloc_gb={mem}")
+PY
+  done
   echo "Extract loss curve example:"
-  echo "  python -c \"import json,sys;[print(json.loads(l)['step'], json.loads(l)['data'].get('train/loss'), json.loads(l)['data'].get('perf/max_memory_allocated_gb')) for l in open(sys.argv[1])]\" ${RUN_ROOT}/gsm8k-sft-30b-muon/*.jsonl"
+  echo "  python -c \"import json,sys;[print(json.loads(l)['step'], json.loads(l)['data'].get('train/loss'), json.loads(l)['data'].get('perf/max_memory_allocated_gb')) for l in open(sys.argv[1])]\" ${RUN_ROOT}/gsm8k-sft-30b-muon/gsm8k-sft-30b-muon/gsm8k-sft-30b-muon.jsonl"
 fi

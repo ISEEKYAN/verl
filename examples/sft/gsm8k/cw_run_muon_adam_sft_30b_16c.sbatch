@@ -5,7 +5,10 @@
 # Proven env from job 14252936 (0.5B smoke) + snapshot muon-mbridge-386bf7af6-r2 (job 13629738).
 # PYTHONPATH layout matches run_mbridge_muon_inside_container.sh (shepherd-verified 2026-07-22):
 #   verl_muon_sft:mlite/experimental/lite:megatron-d64:emerging-optimizers:mbridge-f5d6e2e:nvrx-only-venv/site-packages
-# Shepherd: ssh cw-dfw-cs-001-login-02 && sbatch examples/sft/gsm8k/cw_run_muon_adam_sft_30b_16c.sbatch
+# Shepherd: copy to lustre then sbatch the lustre copy (multi-node srun needs shared path):
+#   cp examples/sft/gsm8k/cw_run_muon_adam_sft_30b_16c.sbatch \
+#      ${CODE_ROOT}/runtime/cw_run_muon_adam_sft_30b_16c.sbatch
+#   ssh cw-dfw-cs-001-login-02 && sbatch ${CODE_ROOT}/runtime/cw_run_muon_adam_sft_30b_16c.sbatch
 #
 # Outputs (loss + perf/max_memory_* in jsonl):
 #   ${RUN_ROOT}/job-${SLURM_JOB_ID}/gsm8k-sft-30b-{muon,adam}/*.jsonl
@@ -90,14 +93,20 @@ done
 
 mkdir -p "${RUN_ROOT}" "${DATA_DIR}"
 
-SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+# Multi-node srun must exec a lustre path visible on every node. Under sbatch, BASH_SOURCE
+# resolves to the node-local spool copy (only on submit node) — node2 gets exit 127.
+SELF_PATH="${SELF_PATH:-${CODE_ROOT}/runtime/cw_run_muon_adam_sft_30b_16c.sbatch}"
 
 if [[ "${IN_MUON_SFT_30B_CONTAINER:-0}" != "1" ]]; then
   [[ -n "${SLURM_JOB_ID:-}" ]] || {
     echo "submit with sbatch on CW login node" >&2
     exit 2
   }
-  export CODE_ROOT RUNTIME_ROOT SNAPSHOT_ROOT CONTAINER_IMAGE VERL_ROOT
+  [[ -f "${SELF_PATH}" ]] || {
+    echo "FATAL: SELF_PATH missing — copy sbatch to lustre before multi-node run: ${SELF_PATH}" >&2
+    exit 2
+  }
+  export CODE_ROOT RUNTIME_ROOT SNAPSHOT_ROOT CONTAINER_IMAGE VERL_ROOT SELF_PATH
   export MLITE_ROOT MEGATRON_ROOT EMERGING_OPT_ROOT MBRIDGE_ROOT NVRX_VENV NVRX_SITE
   export MODEL_PATH DATA_DIR RUN_ROOT MAX_STEPS LR MINLR
   export TRAIN_BATCH_SIZE MICRO_BATCH_SIZE MAX_TOKEN_LEN
@@ -110,7 +119,7 @@ if [[ "${IN_MUON_SFT_30B_CONTAINER:-0}" != "1" ]]; then
     --container-image="${CONTAINER_IMAGE}" \
     --container-mounts=/lustre:/lustre \
     --container-workdir="${VERL_ROOT}" \
-    env IN_MUON_SFT_30B_CONTAINER=1 bash "${SCRIPT_PATH}"
+    env IN_MUON_SFT_30B_CONTAINER=1 bash "${SELF_PATH}"
 fi
 
 ########################### in-container env ###########################

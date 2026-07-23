@@ -291,6 +291,7 @@ run_sft_arm() {
     "data.max_token_len_per_gpu=${MAX_TOKEN_LEN}" \
     data.pad_mode=no_padding \
     data.truncation=error \
+    data.ignore_input_ids_mismatch=True \
     data.num_workers=0 \
     model=hf_model \
     "model.path=${MODEL_PATH}" \

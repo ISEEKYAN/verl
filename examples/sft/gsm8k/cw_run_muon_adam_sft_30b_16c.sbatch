@@ -3,6 +3,8 @@
 # Muon vs AdamW on 16×H100 (2 nodes × 8 GPUs), verl Megatron + mbridge + emerging_optimizers.
 #
 # Proven env from job 14252936 (0.5B smoke) + snapshot muon-mbridge-386bf7af6-r2 (job 13629738).
+# PYTHONPATH layout matches run_mbridge_muon_inside_container.sh (shepherd-verified 2026-07-22):
+#   verl_muon_sft:mlite/experimental/lite:megatron-d64:emerging-optimizers:mbridge-f5d6e2e:nvrx-only-venv/site-packages
 # Shepherd: ssh cw-dfw-cs-001-login-02 && sbatch examples/sft/gsm8k/cw_run_muon_adam_sft_30b_16c.sbatch
 #
 # Outputs (loss + perf/max_memory_* in jsonl):
@@ -32,10 +34,13 @@ SNAPSHOT_ROOT=${SNAPSHOT_ROOT:-${CODE_ROOT}/runtime/muon-mbridge-386bf7af6-r2}
 
 CONTAINER_IMAGE=${CONTAINER_IMAGE:-/lustre/fsw/portfolios/coreai/users/bayan/code/megatron_lite/verl.complete.sqsh}
 VERL_ROOT=${VERL_ROOT:-${CODE_ROOT}/verl_muon_sft}
+MLITE_ROOT=${MLITE_ROOT:-${SNAPSHOT_ROOT}/mlite}
 MEGATRON_ROOT=${MEGATRON_ROOT:-${SNAPSHOT_ROOT}/megatron-d64}
-EMERGING_OPT_SITE=${EMERGING_OPT_SITE:-${SNAPSHOT_ROOT}/emerging-b309/lib/python3.12/site-packages}
-MBRIDGE_SITE=${MBRIDGE_SITE:-${SNAPSHOT_ROOT}/mbridge-f5d6e2e/lib/python3.12/site-packages}
-NVRX_SITE=${NVRX_SITE:-${SNAPSHOT_ROOT}/nvrx-venv-site/lib/python3.12/site-packages}
+# Source checkouts (not site-packages wheels) — see job 13629738 run_mbridge_muon_inside_container.sh
+EMERGING_OPT_ROOT=${EMERGING_OPT_ROOT:-${SNAPSHOT_ROOT}/emerging-optimizers}
+MBRIDGE_ROOT=${MBRIDGE_ROOT:-${SNAPSHOT_ROOT}/mbridge-f5d6e2e}
+NVRX_VENV=${NVRX_VENV:-${CODE_ROOT}/runtime/muon-p0p1-4d2a5b1df-mb-f5d6e2e-v2/nvrx-only-venv}
+NVRX_SITE=${NVRX_SITE:-${NVRX_VENV}/lib/python3.12/site-packages}
 
 MODEL_PATH=${MODEL_PATH:-${CODE_ROOT}/models/Qwen3-30B-A3B}
 DATA_DIR=${DATA_DIR:-${RUNTIME_ROOT}/gsm8k_sft}
@@ -70,10 +75,12 @@ fi
 for path in \
   "${CONTAINER_IMAGE}" \
   "${VERL_ROOT}" \
+  "${MLITE_ROOT}/experimental/lite" \
   "${MEGATRON_ROOT}" \
-  "${EMERGING_OPT_SITE}" \
-  "${MBRIDGE_SITE}" \
-  "${NVRX_SITE}" \
+  "${EMERGING_OPT_ROOT}" \
+  "${MBRIDGE_ROOT}" \
+  "${NVRX_VENV}/bin/activate" \
+  "${NVRX_SITE}/nvidia_resiliency_ext-0.6.0.dist-info" \
   "${MODEL_PATH}/config.json"; do
   [[ -e "${path}" ]] || {
     echo "FATAL: required path missing: ${path}" >&2
@@ -91,7 +98,7 @@ if [[ "${IN_MUON_SFT_30B_CONTAINER:-0}" != "1" ]]; then
     exit 2
   }
   export CODE_ROOT RUNTIME_ROOT SNAPSHOT_ROOT CONTAINER_IMAGE VERL_ROOT
-  export MEGATRON_ROOT EMERGING_OPT_SITE MBRIDGE_SITE NVRX_SITE
+  export MLITE_ROOT MEGATRON_ROOT EMERGING_OPT_ROOT MBRIDGE_ROOT NVRX_VENV NVRX_SITE
   export MODEL_PATH DATA_DIR RUN_ROOT MAX_STEPS LR MINLR
   export TRAIN_BATCH_SIZE MICRO_BATCH_SIZE MAX_TOKEN_LEN
   export TP PP EP CP ETP GPUS_PER_NODE NNODES MASTER_PORT
@@ -117,7 +124,9 @@ export HYDRA_FULL_ERROR=1
 export VERL_SFT_LOGGING_LEVEL=INFO
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-export PYTHONPATH="${VERL_ROOT}:${MEGATRON_ROOT}:${EMERGING_OPT_SITE}:${MBRIDGE_SITE}:${NVRX_SITE}:${PYTHONPATH:-}"
+# Activate nvrx-only venv (nvidia_resiliency_ext 0.6.0) before PYTHONPATH assembly.
+source "${NVRX_VENV}/bin/activate"
+export PYTHONPATH="${VERL_ROOT}:${MLITE_ROOT}/experimental/lite:${MEGATRON_ROOT}:${EMERGING_OPT_ROOT}:${MBRIDGE_ROOT}:${NVRX_SITE}:${PYTHONPATH:-}"
 
 export MASTER_ADDR
 if [[ -z "${MASTER_ADDR:-}" ]]; then

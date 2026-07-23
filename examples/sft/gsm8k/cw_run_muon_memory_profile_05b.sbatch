@@ -39,7 +39,7 @@ MBRIDGE_ROOT=${MBRIDGE_ROOT:-${SNAPSHOT_ROOT}/mbridge-f5d6e2e}
 NVRX_VENV=${NVRX_VENV:-${CODE_ROOT}/runtime/muon-p0p1-4d2a5b1df-mb-f5d6e2e-v2/nvrx-only-venv}
 NVRX_SITE=${NVRX_SITE:-${NVRX_VENV}/lib/python3.12/site-packages}
 
-MODEL_PATH=${MODEL_PATH:-${CODE_ROOT}/models/Qwen2.5-0.5B-Instruct}
+MODEL_PATH=${MODEL_PATH:-${CODE_ROOT}/models/Qwen2.5-0.5B}
 DATA_DIR=${DATA_DIR:-${RUNTIME_ROOT}/gsm8k_sft}
 RUN_ROOT=${RUN_ROOT:-${RUNTIME_ROOT}/mem-profile-05b/job-${SLURM_JOB_ID:-local}}
 

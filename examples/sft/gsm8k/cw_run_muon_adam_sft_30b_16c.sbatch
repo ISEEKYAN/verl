@@ -106,11 +106,21 @@ if [[ "${IN_MUON_SFT_30B_CONTAINER:-0}" != "1" ]]; then
     echo "FATAL: SELF_PATH missing — copy sbatch to lustre before multi-node run: ${SELF_PATH}" >&2
     exit 2
   }
+  # MASTER_ADDR must be resolved on the SLURM host (scontrol is not available inside the container).
+  export MASTER_ADDR
+  if [[ -z "${MASTER_ADDR:-}" ]]; then
+    MASTER_ADDR="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n1)"
+    export MASTER_ADDR
+  fi
+  [[ -n "${MASTER_ADDR}" ]] || {
+    echo "FATAL: could not resolve MASTER_ADDR from SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-}" >&2
+    exit 2
+  }
   export CODE_ROOT RUNTIME_ROOT SNAPSHOT_ROOT CONTAINER_IMAGE VERL_ROOT SELF_PATH
   export MLITE_ROOT MEGATRON_ROOT EMERGING_OPT_ROOT MBRIDGE_ROOT NVRX_VENV NVRX_SITE
   export MODEL_PATH DATA_DIR RUN_ROOT MAX_STEPS LR MINLR
   export TRAIN_BATCH_SIZE MICRO_BATCH_SIZE MAX_TOKEN_LEN
-  export TP PP EP CP ETP GPUS_PER_NODE NNODES MASTER_PORT
+  export TP PP EP CP ETP GPUS_PER_NODE NNODES MASTER_PORT MASTER_ADDR
   exec srun --export=ALL \
     --nodes="${SLURM_NNODES}" \
     --ntasks="${SLURM_NNODES}" \
@@ -137,10 +147,10 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 source "${NVRX_VENV}/bin/activate"
 export PYTHONPATH="${VERL_ROOT}:${MLITE_ROOT}/experimental/lite:${MEGATRON_ROOT}:${EMERGING_OPT_ROOT}:${MBRIDGE_ROOT}:${NVRX_SITE}:${PYTHONPATH:-}"
 
-export MASTER_ADDR
+# MASTER_ADDR is computed on the SLURM host and passed via --export=ALL; do not call scontrol here.
 if [[ -z "${MASTER_ADDR:-}" ]]; then
-  MASTER_ADDR="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n1)"
-  export MASTER_ADDR
+  echo "FATAL: MASTER_ADDR not set — must be resolved before container entry (scontrol unavailable in container)" >&2
+  exit 2
 fi
 export MASTER_PORT NNODES GPUS_PER_NODE
 export NODE_RANK="${SLURM_NODEID}"

@@ -158,6 +158,8 @@ class McoreOptimizerConfig(OptimizerConfig):
         use_layer_wise_distributed_optimizer (bool): Wrap the emerging (Muon) optimizer with Megatron's
             LayerWiseDistributedOptimizer. Only relevant for Muon; mirrors Megatron's
             ``--use-layer-wise-distributed-optimizer``.
+        use_layer_wise_param_layout (bool): Use Megatron's padded shard-aligned DDP layout for LayerWise
+            buffers (master weights in param buffer). Default None → auto True when Muon+LayerWise.
         muon_momentum (float): Momentum of the internal SGD in Muon. Mirrors Megatron's ``--muon-momentum``.
         muon_nesterov (bool): Use Nesterov-style momentum in Muon's internal SGD.
         muon_split_qkv (bool): Split fused QKV parameters before the Muon update.
@@ -191,6 +193,7 @@ class McoreOptimizerConfig(OptimizerConfig):
     # by `init_megatron_optim_config`. Defaults track Megatron-Core so leaving them unset reproduces
     # Megatron's built-in Muon defaults.
     use_layer_wise_distributed_optimizer: bool = False
+    use_layer_wise_param_layout: bool | None = None
     muon_momentum: float = 0.95
     muon_nesterov: bool = False
     muon_split_qkv: bool = True

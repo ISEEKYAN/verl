@@ -27,11 +27,23 @@ from verl.utils.torch_dtypes import PrecisionType
 # ``get_megatron_optimizer`` (anything other than "adam"/"sgd" routes to the emerging path).
 _MUON_ALGORITHMS = ("muon", "adaptive_muon")
 
+
+def is_muon_layer_wise_config(optim_config) -> bool:
+    """True when verl will build Megatron's LayerWiseDistributedOptimizer path."""
+    algo = str(getattr(optim_config, "optimizer", optim_config.get("optimizer", ""))).lower()
+    if algo not in _MUON_ALGORITHMS:
+        return False
+    return bool(
+        getattr(optim_config, "use_layer_wise_distributed_optimizer", None)
+        or optim_config.get("use_layer_wise_distributed_optimizer", False)
+    )
+
 # Muon knobs exposed on verl's ``McoreOptimizerConfig`` that mirror like-named fields on
 # Megatron-Core's ``OptimizerConfig``. Only the ones the installed Megatron actually declares are
 # forwarded (older Megatron builds without emerging_optimizers won't have them).
 _MUON_PASSTHROUGH_FIELDS = (
     "use_layer_wise_distributed_optimizer",
+    "use_layer_wise_param_layout",
     "muon_momentum",
     "muon_nesterov",
     "muon_split_qkv",
@@ -90,6 +102,11 @@ def init_megatron_optim_config(
     }
     if str(optim_config.optimizer).lower() in _MUON_ALGORITHMS:
         _add_muon_args(optim_args, optim_config)
+        # Megatron buffer-integrated master weights (avoids Float16Optimizer fp32 clones).
+        if is_muon_layer_wise_config(optim_config) and getattr(
+            optim_config, "use_layer_wise_param_layout", None
+        ) is None:
+            optim_args["use_layer_wise_param_layout"] = True
     if fp16:
         optim_args.update(
             {

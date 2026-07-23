@@ -322,14 +322,33 @@ run_sft_arm() {
 }
 
 ########################### A/B arms (node0 orchestrates order) ###########################
+# ARMS: comma-separated subset, e.g. ARMS=adam to rerun baseline only after a transient failure.
+ARMS=${ARMS:-muon,adam}
+IFS=',' read -r -a ARM_LIST <<< "${ARMS}"
+
 if [[ "${NODE_RANK}" == "0" ]]; then
-  echo "=== A/B protocol: muon then adam; extract json['data']['train/loss'] + perf/max_memory_* ==="
+  echo "=== A/B protocol arms=[${ARMS}]; extract json['data']['train/loss'] + perf/max_memory_* ==="
 fi
 
-run_sft_arm muon
-# Brief pause so NCCL teardown completes before second arm
-sleep 10
-run_sft_arm adam
+for ((i = 0; i < ${#ARM_LIST[@]}; i++)); do
+  arm="${ARM_LIST[$i]}"
+  run_sft_arm "${arm}"
+  if (( i + 1 < ${#ARM_LIST[@]} )); then
+    # NCCL teardown + CUDA cache release before the next arm (reduces stale-handle flakes).
+    sleep 30
+    python - <<'PY' || true
+import gc
+try:
+    import torch
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+except Exception:
+    pass
+gc.collect()
+PY
+  fi
+done
 
 if [[ "${NODE_RANK}" == "0" ]]; then
   echo "=== DONE job=${SLURM_JOB_ID} outputs under ${RUN_ROOT} ==="

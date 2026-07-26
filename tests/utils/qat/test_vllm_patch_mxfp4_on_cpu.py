@@ -196,6 +196,12 @@ def test_mxfp4_patch_rebuilds_hf_params_and_preserves_compute_addresses(monkeypa
     layer = _FakeMxfp4Layer()
     method = _FakeMxfp4Method()
 
+    loaded_params = []
+
+    def record_loaded_param(*args, **kwargs):
+        loaded_params.append(kwargs["param"] if "param" in kwargs else args[0])
+
+    layer.w13_weight_packed.weight_loader = record_loaded_param
     vllm_patch.patched_mxfp4_moe_process_weights_after_loading(method, layer)
     original_ptrs = {
         name: getattr(layer, name).data_ptr()
@@ -205,6 +211,10 @@ def test_mxfp4_patch_rebuilds_hf_params_and_preserves_compute_addresses(monkeypa
     model = torch.nn.Module()
     model.add_module("experts", layer)
     vllm_patch.prepare_qat_for_load_weights(model, device=torch.device("cpu"))
+    assert hasattr(layer.w13_weight, "weight_loader")
+    layer.w13_weight.weight_loader(layer.w13_weight)
+    assert loaded_params == [layer.w13_weight_packed]
+
     layer.w13_weight_packed.fill_(7)
     layer.w2_weight_packed.fill_(9)
     layer.w13_weight_scale.fill_(11)

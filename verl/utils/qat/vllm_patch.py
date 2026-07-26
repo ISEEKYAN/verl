@@ -921,21 +921,30 @@ def patched_mxfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module
 
     if is_first_call:
         layer._mxfp4_tensor_refs = {param_name: getattr(layer, param_name).data for param_name in _MXFP4_COMPUTE_PARAMS}
-        return
+    else:
+        refs = layer._mxfp4_tensor_refs
+        for param_name in _MXFP4_COMPUTE_PARAMS:
+            transformed = getattr(layer, param_name).data
+            stable = refs[param_name]
+            if stable.shape != transformed.shape or stable.dtype != transformed.dtype:
+                raise ValueError(
+                    f"MXFP4 reload changed {param_name} contract: "
+                    f"{tuple(stable.shape)}/{stable.dtype} -> {tuple(transformed.shape)}/{transformed.dtype}"
+                )
+            stable.copy_(transformed)
+            setattr(layer, param_name, Parameter(stable, requires_grad=False))
 
-    refs = layer._mxfp4_tensor_refs
-    for param_name in _MXFP4_COMPUTE_PARAMS:
-        transformed = getattr(layer, param_name).data
-        stable = refs[param_name]
-        if stable.shape != transformed.shape or stable.dtype != transformed.dtype:
-            raise ValueError(
-                f"MXFP4 reload changed {param_name} contract: "
-                f"{tuple(stable.shape)}/{stable.dtype} -> {tuple(transformed.shape)}/{transformed.dtype}"
-            )
-        stable.copy_(transformed)
-        setattr(layer, param_name, Parameter(stable, requires_grad=False))
+        _rebuild_mxfp4_moe_kernel(self, layer)
 
-    _rebuild_mxfp4_moe_kernel(self, layer)
+    _restore_param_weight_loaders(
+        layer,
+        {
+            "w13_weight": "w13_weight_packed",
+            "w2_weight": "w2_weight_packed",
+            "w13_weight_scale": "w13_weight_scale",
+            "w2_weight_scale": "w2_weight_scale",
+        },
+    )
 
 
 _PATCH_TARGETS = [

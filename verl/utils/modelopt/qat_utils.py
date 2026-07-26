@@ -41,5 +41,9 @@ def export_qat_weights(per_tensor_param, modules, qat_config, bridge):
     """Process exported weights through QATWeightExporter for quantized weight sync."""
     from verl.utils.modelopt.qat_weight_exporter import QATWeightExporter
 
-    qat_weight_exporter = QATWeightExporter(modules, bridge, qat_config)
+    use_modelopt_fake_quant = _get_qat_field(qat_config, "apply_modelopt_fake_quant", True)
+    if bridge is None and not use_modelopt_fake_quant:
+        qat_weight_exporter = QATWeightExporter.from_hf_stream(qat_config)
+    else:
+        qat_weight_exporter = QATWeightExporter(modules, bridge, qat_config)
     return qat_weight_exporter.process_weights_iterator(per_tensor_param)

@@ -163,6 +163,57 @@ def test_export_only_mode_does_not_require_a_megatron_bridge(monkeypatch):
     assert meta.qformat == "nvfp4"
 
 
+def test_hf_stream_exporter_does_not_require_megatron_parallel_state(monkeypatch):
+    exporter_module = _install_exporter_dependencies(monkeypatch)
+    config = SimpleNamespace(
+        mode="w4a16",
+        group_size=16,
+        ignore_patterns=["lm_head"],
+        apply_modelopt_fake_quant=False,
+    )
+
+    exporter = exporter_module.QATWeightExporter.from_hf_stream(config)
+
+    assert exporter._actor_module == []
+    assert exporter._metadata == {}
+    assert exporter._registry is None
+    assert exporter._pp_size == 1
+    assert exporter._ep_size == 1
+    assert exporter._resolve_quant_metadata("model.layers.0.self_attn.q_proj.weight").qformat == "nvfp4"
+    assert exporter._resolve_quant_metadata("lm_head.weight") is None
+
+
+def test_export_helper_uses_hf_stream_path_for_non_modelopt_backend(monkeypatch):
+    exporter_module = _install_exporter_dependencies(monkeypatch)
+    qat_utils = importlib.import_module("verl.utils.modelopt.qat_utils")
+    config = SimpleNamespace(
+        mode="mxfp4",
+        group_size=32,
+        ignore_patterns=[],
+        apply_modelopt_fake_quant=False,
+    )
+    sentinel = object()
+    captured = {}
+
+    class FakeExporter:
+        @classmethod
+        def from_hf_stream(cls, qat_config):
+            captured["qat_config"] = qat_config
+            return cls()
+
+        def process_weights_iterator(self, weights):
+            captured["weights"] = weights
+            return sentinel
+
+    monkeypatch.setattr(exporter_module, "QATWeightExporter", FakeExporter)
+    source = iter(())
+
+    result = qat_utils.export_qat_weights(source, [object()], config, bridge=None)
+
+    assert result is sentinel
+    assert captured == {"qat_config": config, "weights": source}
+
+
 def test_nvfp4_export_only_mode_computes_current_weight_amax(monkeypatch):
     exporter_module = _install_exporter_dependencies(monkeypatch)
     calls = []

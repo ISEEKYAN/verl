@@ -52,12 +52,8 @@ class _QuantMeta:
 class QATWeightExporter:
     """Export QAT-trained bf16 weights as quantized weights (e.g. NVFP4)."""
 
-    def __init__(
-        self,
-        actor_module: list,
-        bridge: Any,
-        qat_config: Any = "w4a16",
-    ):
+    def _configure_export(self, qat_config: Any) -> None:
+        """Resolve the format contract shared by Megatron and HF-stream export."""
         if isinstance(qat_config, str):
             self.qat_mode = qat_config
             self._block_size = 32 if qat_config == "mxfp4" else 16
@@ -68,6 +64,14 @@ class QATWeightExporter:
             self._block_size = getattr(qat_config, "group_size", 32 if self.qat_mode == "mxfp4" else 16)
             self._ignore_patterns = list(getattr(qat_config, "ignore_patterns", []))
             self._use_modelopt_fake_quant = getattr(qat_config, "apply_modelopt_fake_quant", True)
+
+    def __init__(
+        self,
+        actor_module: list,
+        bridge: Any,
+        qat_config: Any = "w4a16",
+    ):
+        self._configure_export(qat_config)
         self._actor_module = actor_module
 
         self._registry = self._get_mapping_registry(bridge)
@@ -92,6 +96,34 @@ class QATWeightExporter:
             self._sync_metadata(self._pp_group)
         if self._ep_size > 1 and self._ep_group is not None:
             self._sync_metadata(self._ep_group)
+
+    @classmethod
+    def from_hf_stream(cls, qat_config: Any) -> "QATWeightExporter":
+        """Build an export-only instance for an already HF-named BF16 stream.
+
+        This path intentionally has no Megatron module, bridge, or parallel-state
+        dependency. It is valid only when fake quantization is supplied by the
+        training backend and the explicit QAT config is authoritative.
+        """
+        exporter = cls.__new__(cls)
+        exporter._configure_export(qat_config)
+        if exporter._use_modelopt_fake_quant:
+            raise ValueError(
+                "from_hf_stream requires apply_modelopt_fake_quant=False because "
+                "there is no ModelOpt module metadata to export"
+            )
+        exporter._actor_module = []
+        exporter._registry = None
+        exporter._pp_size = 1
+        exporter._pp_rank = 0
+        exporter._pp_group = None
+        exporter._ep_size = 1
+        exporter._ep_rank = 0
+        exporter._ep_group = None
+        exporter._config = None
+        exporter._num_local_experts = 0
+        exporter._metadata = {}
+        return exporter
 
     def process_weights_iterator(
         self,

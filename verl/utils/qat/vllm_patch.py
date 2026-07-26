@@ -765,7 +765,21 @@ def _restore_param_weight_loaders(layer: torch.nn.Module, param_sources: dict[st
         param = getattr(layer, param_name, None)
         weight_loader = weight_loaders.get(source_name)
         if param is not None and weight_loader is not None:
-            param.weight_loader = weight_loader
+            if param_name == source_name:
+                param.weight_loader = weight_loader
+                continue
+
+            def redirect_to_source_param(*args, _source_name=source_name, _weight_loader=weight_loader, **kwargs):
+                source_param = getattr(layer, _source_name)
+                if "param" in kwargs:
+                    kwargs["param"] = source_param
+                elif args:
+                    args = (source_param, *args[1:])
+                else:
+                    kwargs["param"] = source_param
+                return _weight_loader(*args, **kwargs)
+
+            param.weight_loader = redirect_to_source_param
 
 
 def _restore_compute_refs(layer: torch.nn.Module, prefix: str) -> None:

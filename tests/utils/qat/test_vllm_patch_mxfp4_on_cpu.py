@@ -132,18 +132,27 @@ def test_current_nvfp4_moe_patch_preserves_compute_addresses(monkeypatch):
     )
     layer = _FakeMxfp4Layer()
     method = _FakeMxfp4Method()
+    loaded_params = []
+
+    def record_loaded_param(*args, **kwargs):
+        loaded_params.append(kwargs["param"] if "param" in kwargs else args[0])
+
+    layer.w13_weight_packed.weight_loader = record_loaded_param
 
     vllm_patch.patched_current_nvfp4_moe_process_weights_after_loading(method, layer)
     original_ptrs = {
         name: getattr(layer, name).data_ptr()
         for name in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
     }
-    assert layer.w13_weight.weight_loader is layer._weight_loaders["w13_weight_packed"]
-    assert layer.w2_weight.weight_loader is layer._weight_loaders["w2_weight_packed"]
+    assert layer.w13_weight.weight_loader is not layer._weight_loaders["w13_weight_packed"]
+    assert layer.w2_weight.weight_loader is not layer._weight_loaders["w2_weight_packed"]
 
     model = torch.nn.Module()
     model.add_module("experts", layer)
     vllm_patch.prepare_qat_for_load_weights(model, device=torch.device("cpu"))
+    layer.w13_weight.weight_loader(layer.w13_weight)
+    assert len(loaded_params) == 1
+    assert loaded_params[0] is layer.w13_weight_packed
     layer.w13_weight_packed.fill_(3)
     layer.w2_weight_packed.fill_(4)
     layer.w13_weight_scale.fill_(5)
@@ -158,8 +167,8 @@ def test_current_nvfp4_moe_patch_preserves_compute_addresses(monkeypatch):
         name: getattr(layer, name).data_ptr()
         for name in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
     } == original_ptrs
-    assert layer.w13_weight.weight_loader is layer._weight_loaders["w13_weight_packed"]
-    assert layer.w2_weight.weight_loader is layer._weight_loaders["w2_weight_packed"]
+    assert layer.w13_weight.weight_loader is not layer._weight_loaders["w13_weight_packed"]
+    assert layer.w2_weight.weight_loader is not layer._weight_loaders["w2_weight_packed"]
 
 
 def test_mxfp4_dense_patch_rebuilds_hf_params_and_preserves_compute_addresses(monkeypatch):

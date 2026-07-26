@@ -759,6 +759,15 @@ def _save_compute_refs(layer: torch.nn.Module, prefix: str) -> None:
     }
 
 
+def _restore_param_weight_loaders(layer: torch.nn.Module, param_sources: dict[str, str]) -> None:
+    weight_loaders = getattr(layer, "_weight_loaders", {})
+    for param_name, source_name in param_sources.items():
+        param = getattr(layer, param_name, None)
+        weight_loader = weight_loaders.get(source_name)
+        if param is not None and weight_loader is not None:
+            param.weight_loader = weight_loader
+
+
 def _restore_compute_refs(layer: torch.nn.Module, prefix: str) -> None:
     refs = getattr(layer, f"_{prefix}_tensor_refs")
     for name, stable in refs.items():
@@ -801,6 +810,19 @@ def patched_current_nvfp4_moe_process_weights_after_loading(self, layer: torch.n
         _save_compute_refs(layer, "nvfp4")
     else:
         _restore_compute_refs(layer, "nvfp4")
+    _restore_param_weight_loaders(
+        layer,
+        {
+            "w13_weight": "w13_weight_packed",
+            "w2_weight": "w2_weight_packed",
+            "w13_weight_scale": "w13_weight_scale",
+            "w2_weight_scale": "w2_weight_scale",
+            "w13_weight_global_scale": "w13_weight_global_scale",
+            "w2_weight_global_scale": "w2_weight_global_scale",
+            "w13_input_global_scale": "w13_input_global_scale",
+            "w2_input_global_scale": "w2_input_global_scale",
+        },
+    )
 
 
 def patched_mxfp4_dense_process_weights_after_loading(self, layer: torch.nn.Module) -> None:

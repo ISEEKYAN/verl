@@ -138,6 +138,8 @@ def test_current_nvfp4_moe_patch_preserves_compute_addresses(monkeypatch):
         name: getattr(layer, name).data_ptr()
         for name in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
     }
+    assert layer.w13_weight.weight_loader is layer._weight_loaders["w13_weight_packed"]
+    assert layer.w2_weight.weight_loader is layer._weight_loaders["w2_weight_packed"]
 
     model = torch.nn.Module()
     model.add_module("experts", layer)
@@ -156,6 +158,8 @@ def test_current_nvfp4_moe_patch_preserves_compute_addresses(monkeypatch):
         name: getattr(layer, name).data_ptr()
         for name in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
     } == original_ptrs
+    assert layer.w13_weight.weight_loader is layer._weight_loaders["w13_weight_packed"]
+    assert layer.w2_weight.weight_loader is layer._weight_loaders["w2_weight_packed"]
 
 
 def test_mxfp4_dense_patch_rebuilds_hf_params_and_preserves_compute_addresses(monkeypatch):

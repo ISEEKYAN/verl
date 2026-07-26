@@ -175,12 +175,21 @@ def test_mxfp4_dense_patch_rebuilds_hf_params_and_preserves_compute_addresses(mo
     monkeypatch.setattr(vllm_patch, "_original_mxfp4_dense_process_weights_after_loading", _fake_original_dense_process)
     layer = _FakeMxfp4DenseLayer()
 
+    loaded_params = []
+
+    def record_loaded_param(*args, **kwargs):
+        loaded_params.append(kwargs["param"] if "param" in kwargs else args[0])
+
+    layer.weight_packed.weight_loader = record_loaded_param
     vllm_patch.patched_mxfp4_dense_process_weights_after_loading(object(), layer)
     original_ptrs = {name: getattr(layer, name).data_ptr() for name in ("weight", "weight_scale")}
 
     model = torch.nn.Module()
     model.add_module("linear", layer)
     vllm_patch.prepare_qat_for_load_weights(model, device=torch.device("cpu"))
+    assert hasattr(layer.weight, "weight_loader")
+    layer.weight.weight_loader(layer.weight)
+    assert loaded_params == [layer.weight_packed]
     layer.weight_packed.fill_(5)
     layer.weight_scale.fill_(7)
 
@@ -189,6 +198,10 @@ def test_mxfp4_dense_patch_rebuilds_hf_params_and_preserves_compute_addresses(mo
     assert torch.all(layer.weight == 5)
     assert torch.all(layer.weight_scale == 7)
     assert {name: getattr(layer, name).data_ptr() for name in ("weight", "weight_scale")} == original_ptrs
+    vllm_patch.prepare_qat_for_load_weights(model, device=torch.device("cpu"))
+    layer.weight.weight_loader(layer.weight)
+    assert len(loaded_params) == 2
+    assert loaded_params[-1] is layer.weight_packed
 
 
 def test_mxfp4_patch_rebuilds_hf_params_and_preserves_compute_addresses(monkeypatch):

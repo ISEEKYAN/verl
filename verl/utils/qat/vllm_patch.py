@@ -213,6 +213,10 @@ def _create_param_from_meta(
 
     weight_loaders = getattr(module, "_weight_loaders", {})
     weight_loader = weight_loaders.get(param_name)
+    if weight_loader is None:
+        module_weight_loader = getattr(module, "weight_loader", None)
+        if callable(module_weight_loader):
+            weight_loader = module_weight_loader
 
     data = torch.empty(shape, dtype=dtype, device=dev)
 

@@ -44,6 +44,38 @@ class _FakeMxfp4DenseLayer(torch.nn.Module):
         self.register_parameter("weight_scale", _FakeMxfp4Layer._param((8, 1)))
 
 
+class _LatePatchedMoeLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight_loader = lambda *args, **kwargs: None
+        self._weight_loaders = {}
+        self._hf_param_meta = {
+            "w13_weight_packed": {
+                "shape": (2, 8, 16),
+                "dtype": torch.uint8,
+                "device": "cpu",
+                "param_class": torch.nn.Parameter,
+            }
+        }
+        self.register_parameter(
+            "w13_weight_packed",
+            torch.nn.Parameter(
+                torch.zeros((2, 8, 16), dtype=torch.uint8),
+                requires_grad=False,
+            ),
+        )
+
+
+def test_prepare_qat_uses_moe_layer_loader_when_first_pass_cache_is_stale():
+    layer = _LatePatchedMoeLayer()
+    model = torch.nn.Module()
+    model.add_module("experts", layer)
+
+    vllm_patch.prepare_qat_for_load_weights(model, device=torch.device("cpu"))
+
+    assert layer.w13_weight_packed.weight_loader is layer.weight_loader
+
+
 def _fake_original_process(self, layer):
     layer.w13_weight = torch.nn.Parameter(layer.w13_weight_packed.detach().clone(), requires_grad=False)
     layer.w2_weight = torch.nn.Parameter(layer.w2_weight_packed.detach().clone(), requires_grad=False)

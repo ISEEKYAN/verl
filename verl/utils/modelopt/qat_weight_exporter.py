@@ -274,8 +274,8 @@ class QATWeightExporter:
         Produces up to four tensors:
           ``(name, packed_uint8_weight)``
           ``(weight_scale, per_block_fp8_scale)``
-          ``(weight_scale_2, global_scale_from_amax)``
-          ``(input_scale, activation_scale)`` -- only when available
+          ``(weight_global_scale, global_scale_from_amax)``
+          ``(input_global_scale, activation_scale)`` -- only when available
         """
         w_amax = weight.detach().abs().amax() if meta.weight_amax is None else meta.weight_amax.to(weight.device)
         w_scale_2 = w_amax.float() / _NVFP4_AMAX_DENOMINATOR
@@ -290,11 +290,11 @@ class QATWeightExporter:
 
         yield (name, quantized)
         yield (_derive_scale_name(name, "weight_scale"), w_scale)
-        yield (_derive_scale_name(name, "weight_scale_2"), w_scale_2)
+        yield (_derive_scale_name(name, "weight_global_scale"), w_scale_2)
 
         input_scale = _compute_input_scale(meta)
         if input_scale is not None:
-            yield (_derive_scale_name(name, "input_scale"), input_scale)
+            yield (_derive_scale_name(name, "input_global_scale"), input_scale)
 
     def _quantize_mxfp4(
         self,

@@ -225,9 +225,26 @@ def test_nvfp4_export_only_mode_computes_current_weight_amax(monkeypatch):
     monkeypatch.setattr(exporter_module, "to_quantized_weight", fake_to_quantized_weight)
     exporter = object.__new__(exporter_module.QATWeightExporter)
     weight = torch.tensor([[1.0, -7.0] * 8])
-    meta = exporter_module._QuantMeta(qformat="nvfp4", block_size=16, weight_amax=None)
+    meta = exporter_module._QuantMeta(
+        qformat="nvfp4",
+        block_size=16,
+        weight_amax=None,
+        input_amax=torch.tensor(3.0),
+    )
 
-    list(exporter._quantize_nvfp4("model.layers.0.self_attn.q_proj.weight", weight, meta))
+    result = list(
+        exporter._quantize_nvfp4(
+            "model.layers.0.mlp.experts.0.gate_proj.weight",
+            weight,
+            meta,
+        )
+    )
 
     assert calls[0][0].item() == pytest.approx(7.0 / (6.0 * 448.0))
     assert calls[0][1:] == ("nvfp4", 16)
+    assert [name for name, _ in result] == [
+        "model.layers.0.mlp.experts.0.gate_proj.weight",
+        "model.layers.0.mlp.experts.0.gate_proj.weight_scale",
+        "model.layers.0.mlp.experts.0.gate_proj.weight_global_scale",
+        "model.layers.0.mlp.experts.0.gate_proj.input_global_scale",
+    ]

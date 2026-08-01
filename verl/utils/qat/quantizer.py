@@ -36,6 +36,7 @@ from compressed_tensors.quantization.quant_args import (
 from compressed_tensors.quantization.utils.helpers import generate_gparam
 
 from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.qat.fused_scale_contract import NVFP4_FUSED_GLOBAL_SCALE_GROUPS
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -74,13 +75,6 @@ def compute_blockwise_scale(
     return blockwise_scale
 
 
-# Fusion patterns for transformer models
-FUSE_PATTERNS = {
-    "qkv": ["q_proj", "k_proj", "v_proj"],
-    "gate_up": ["gate_proj", "up_proj"],
-}
-
-
 def fuse_global_scales(
     layer_global_scales: dict[str, torch.Tensor],
     strategy: str = "min",
@@ -99,7 +93,7 @@ def fuse_global_scales(
     processed = set()
 
     for parent, children in parent_to_children.items():
-        for _, patterns in FUSE_PATTERNS.items():
+        for patterns in NVFP4_FUSED_GLOBAL_SCALE_GROUPS.values():
             matched = [children[p] for p in patterns if p in children]
             if len(matched) == len(patterns):
                 group_scales = [layer_global_scales[n] for n in matched]

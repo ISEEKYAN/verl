@@ -21,6 +21,12 @@ import torch
 from torch.nn import Parameter
 
 from verl.utils.device import get_device_name
+from verl.utils.modelopt.dense_qkv_layout import (
+    NVFP4_DENSE_STREAM_SUFFIX_TO_PARAM_CANDIDATES,
+    NVFP4_GROUP_SCALE_SUFFIX,
+    NVFP4_PACKED_WEIGHT_SUFFIX,
+    _match_dense_qkv_name,
+)
 
 
 def _save_param_meta(layer: torch.nn.Module, param_name: str):
@@ -42,6 +48,12 @@ def _save_param_meta(layer: torch.nn.Module, param_name: str):
         meta["input_dim"] = param._input_dim
     if hasattr(param, "_output_dim"):
         meta["output_dim"] = param._output_dim
+    # vLLM 0.23 Row/ColumnParallelLinear.weight_loader reads the public
+    # attributes installed by set_weight_attrs. Preserve those exact axes.
+    if hasattr(param, "input_dim"):
+        meta["input_dim"] = param.input_dim
+    if hasattr(param, "output_dim"):
+        meta["output_dim"] = param.output_dim
 
     layer._hf_param_meta[param_name] = meta
 
@@ -59,6 +71,13 @@ def _create_param_from_meta(
 
     weight_loaders = getattr(module, "_weight_loaders", {})
     weight_loader = weight_loaders.get(param_name)
+    if weight_loader is None:
+        # Some fused-MoE owners expose one module-level loader rather than a
+        # loader attached to each parameter.  Keep this restore path symmetric
+        # with the compressed-tensors patch.
+        module_weight_loader = getattr(module, "weight_loader", None)
+        if callable(module_weight_loader):
+            weight_loader = module_weight_loader
 
     data = torch.empty(shape, dtype=dtype, device=dev)
 
@@ -73,6 +92,10 @@ def _create_param_from_meta(
         new_param = Parameter(data, requires_grad=False)
         if weight_loader is not None:
             new_param.weight_loader = weight_loader
+
+    for attr in ("input_dim", "output_dim"):
+        if attr in meta:
+            setattr(new_param, attr, meta[attr])
 
     return new_param
 
@@ -231,6 +254,8 @@ def _modelopt_dense_process_weights(self, layer: torch.nn.Module) -> None:
     )
 
     is_first_call = _check_first_call(layer)
+    # Source of truth is ModelOptNvFp4Config.group_size, not a shape guess.
+    layer._modelopt_group_size = int(self.quant_config.group_size)
 
     if is_first_call:
         for pname in _DENSE_HF_PARAMS:
@@ -247,7 +272,7 @@ def _modelopt_dense_process_weights(self, layer: torch.nn.Module) -> None:
     part_size_n = layer.output_size_per_partition
     part_size_k = layer.input_size_per_partition
     param_dtype = layer.params_dtype
-    group_size = 16
+    group_size = layer._modelopt_group_size
     weight_scale_2_max = weight_scale_2_data.max().to(torch.float32)
 
     if is_first_call:
@@ -568,6 +593,96 @@ def prepare_modelopt_for_weight_reload(model, device=None):
 
     inner_model._param_meta_for_restore = param_meta
     return param_meta
+
+
+def _prepare_direct_dense_checkpoint_tensor(module: torch.nn.Module, name: str, tensor: torch.Tensor, suffix: str):
+    """Restore and validate one non-fused dense owner from declared vLLM axes."""
+    group_size = getattr(module, "_modelopt_group_size", None)
+    meta = getattr(module, "_hf_param_meta", None)
+    if group_size is None and meta is None:
+        return
+    if group_size is None:
+        raise ValueError(f"dense NVFP4 group_size contract is missing for {name}")
+    if meta is None:
+        raise ValueError(f"dense NVFP4 checkpoint metadata is missing for {name}")
+
+    n = int(module.output_size)
+    k = int(module.input_size)
+    if k % 2 or k % group_size:
+        raise ValueError(
+            f"dense NVFP4 K axis must divide packing/group sizes for {name}: K={k}, group_size={group_size}"
+        )
+    expected = {
+        "weight": (n, k // 2),
+        NVFP4_PACKED_WEIGHT_SUFFIX: (n, k // 2),
+        NVFP4_GROUP_SCALE_SUFFIX: (n, k // group_size),
+    }.get(suffix)
+    if expected is not None and tuple(tensor.shape) != expected:
+        raise ValueError(
+            f"dense NVFP4 source axis mismatch for {name}: got {tuple(tensor.shape)}, expected {expected}; "
+            f"vLLM declares N=output_size={n}, K=input_size={k}, group_size={group_size}"
+        )
+
+    param_candidates = NVFP4_DENSE_STREAM_SUFFIX_TO_PARAM_CANDIDATES[suffix]
+    param_name = next((candidate for candidate in param_candidates if candidate in meta), None)
+    if param_name is None:
+        raise ValueError(f"dense NVFP4 checkpoint metadata lacks {param_candidates} for {name}")
+    param_meta = meta[param_name]
+    current = getattr(module, param_name, None)
+    checkpoint_shape = tuple(param_meta["shape"])
+    if current is None or tuple(current.shape) != checkpoint_shape or current.dtype != param_meta["dtype"]:
+        restored = _create_param_from_meta(module, param_name, param_meta, tensor.device)
+        setattr(module, param_name, restored)
+    restored = getattr(module, param_name)
+    if tuple(restored.shape) != checkpoint_shape:
+        raise ValueError(
+            f"dense NVFP4 checkpoint restore failed for {name}: "
+            f"got {tuple(restored.shape)}, expected {checkpoint_shape}"
+        )
+    return param_name
+
+
+def prepare_modelopt_nvfp4_weight_stream(model, weights):
+    """Prepare ordinary dense owners while preserving native Q/K/V shard names.
+
+    RowParallelLinear declares a global checkpoint matrix ``[N,K]`` with
+    ``N=output_size`` and ``K=input_size``; its public ``input_dim`` tells the
+    loader to shard K. ColumnParallelLinear uses ``output_dim`` to shard N.
+    ModelOpt NVFP4 stores these as weight ``[N,K/2]`` and group scale
+    ``[N,K/group_size]``. Names locate the live owner only; declared axes decide
+    layout validity.
+    """
+    modules = dict(model.named_modules())
+    for name, tensor in weights:
+        match = _match_dense_qkv_name(name)
+        if match is None:
+            direct = None
+            for suffix in NVFP4_DENSE_STREAM_SUFFIX_TO_PARAM_CANDIDATES:
+                marker = f".{suffix}"
+                if name.endswith(marker):
+                    direct = (name[: -len(marker)], suffix)
+                    break
+            if direct is not None:
+                module_name, suffix = direct
+                layer = modules.get(module_name)
+                if layer is None and module_name.endswith(".base_layer"):
+                    layer = modules.get(module_name.removesuffix(".base_layer"))
+                if layer is not None:
+                    checkpoint_suffix = _prepare_direct_dense_checkpoint_tensor(layer, name, tensor, suffix)
+                    if checkpoint_suffix is not None:
+                        yield f"{module_name}.{checkpoint_suffix}", tensor
+                        continue
+            yield name, tensor
+            continue
+        if match.group("projection") != "qkv_proj":
+            # Qwen's stacked_params_mapping consumes q/k/v source names and
+            # supplies the shard_id used to fill the fused qkv_proj owner.
+            yield name, tensor
+            continue
+        raise ValueError(
+            f"pre-fused dense QKV source name is not loadable by vLLM's native shard mapping: {name}; "
+            "export q_proj/k_proj/v_proj tensors instead"
+        )
 
 
 def modelopt_process_weights_after_loading(model):

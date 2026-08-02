@@ -13,26 +13,101 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""QAT weight exporter for Megatron-to-vLLM NVFP4 quantized weight sync."""
+"""QAT weight exporter for Megatron-to-vLLM FP4 quantized weight sync."""
 
 import re
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from typing import Any, Iterator, Optional
 
 import torch
 from modelopt.torch.export.quant_utils import (
+    QUANTIZATION_MXFP4,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     get_quantization_format,
     get_weight_block_size,
     to_quantized_weight,
 )
+from modelopt.torch.quantization.qtensor.mxfp4_tensor import MXFP4QTensor
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 from verl.utils.megatron_utils import unwrap_model
+from verl.utils.modelopt.dense_qkv_layout import (
+    NVFP4_GLOBAL_SCALE_SUFFIX,
+    NVFP4_GROUP_SCALE_SUFFIX,
+    NVFP4_INPUT_SCALE_SUFFIX,
+    NVFP4_PACKED_WEIGHT_SUFFIX,
+)
+from verl.utils.qat.fused_scale_contract import fuse_nvfp4_global_scales, resolve_nvfp4_fused_global_scale_group
 
 # NVFP4 two-level scaling denominator: FP4_MAX (6.0) * FP8_MAX (448.0).
 _NVFP4_AMAX_DENOMINATOR = 6.0 * 448.0
+
+
+def _to_compressed_tensors_divisor(scale: torch.Tensor, *, parameter_name: str) -> torch.Tensor:
+    """Encode a ModelOpt NVFP4 multiplier for compressed-tensors checkpoints.
+
+    ModelOpt calls the multiplier ``weight_scale_2`` and dequantizes with
+    ``block_scale * weight_scale_2``.  compressed-tensors persists the inverse
+    under ``*_global_scale`` and its vLLM post-process restores the multiplier
+    with ``1 / checkpoint_value``.
+    """
+    scale_f32 = scale.to(dtype=torch.float32)
+    if not torch.isfinite(scale_f32).all() or not torch.all(scale_f32 > 0):
+        raise ValueError(f"NVFP4 compressed-tensors divisor requires finite positive scale for {parameter_name}")
+    return torch.reciprocal(scale_f32)
+
+
+class _NVFP4PackedLayout:
+    """NVFP4 dense/W2 packed contract shared by ModelOpt export and vLLM 0.23.
+
+    ModelOpt's fused-expert export packs the intermediate axis first
+    (``[I/2, H]``); vLLM's ``CompressedTensorsW4A4Nvfp4MoEMethod`` allocates
+    W2 as ``[H, I/2]``.  The accompanying group scale has the vLLM logical
+    layout ``[H, I/group]``.  We use that scale layout as the discriminator,
+    rather than matching a checkpoint parameter name.
+    """
+
+    def to_vllm_packed(
+        self,
+        parameter_name: str,
+        logical: torch.Tensor,
+        packed: torch.Tensor,
+        weight_scale: torch.Tensor,
+        *,
+        group_size: int,
+    ) -> torch.Tensor:
+        if logical.ndim != 2 or packed.ndim != 2 or weight_scale.ndim != 2:
+            raise ValueError(
+                f"dense NVFP4 layout requires 2D logical, packed, and scale tensors for {parameter_name}; "
+                f"logical={tuple(logical.shape)}, packed={tuple(packed.shape)}/{packed.dtype}, "
+                f"scale={tuple(weight_scale.shape)}/{weight_scale.dtype}"
+            )
+        n, k = logical.shape
+        if group_size <= 0 or k % group_size or k % 2:
+            raise ValueError(f"dense NVFP4 K axis must divide group/packing sizes: K={k}, group_size={group_size}")
+
+        # ModelOptNvFp4LinearMethod.create_weights: [N,K/2] and [N,K/group].
+        dense_packed = (n, k // 2)
+        dense_scale = (n, k // group_size)
+        if tuple(weight_scale.shape) == dense_scale and tuple(packed.shape) == dense_packed:
+            return packed
+
+        # ModelOpt fused-expert W2 export carries the opposite logical axes:
+        # packed [N/2,K], scale [K,N/group]. vLLM's MoE owner requires [K,N/2].
+        fused_w2_packed = (n // 2, k) if n % 2 == 0 else ()
+        fused_w2_scale = (k, n // group_size) if n % group_size == 0 else ()
+        if tuple(weight_scale.shape) == fused_w2_scale and tuple(packed.shape) == fused_w2_packed:
+            return packed.t().contiguous()
+        raise ValueError(
+            f"dense NVFP4 packed layout mismatch for {parameter_name}: "
+            f"logical={tuple(logical.shape)}, packed={tuple(packed.shape)}/{packed.dtype}, "
+            f"scale={tuple(weight_scale.shape)}/{weight_scale.dtype}, group_size={group_size}"
+        )
+
+
+_NVFP4_PACKED_LAYOUT = _NVFP4PackedLayout()
 
 
 @dataclass
@@ -49,13 +124,30 @@ class _QuantMeta:
 class QATWeightExporter:
     """Export QAT-trained bf16 weights as quantized weights (e.g. NVFP4)."""
 
+    def _configure_export(self, qat_config: Any) -> None:
+        """Resolve the format contract shared by Megatron and HF-stream export."""
+        # ModelOpt's native checkpoint parameter is named ``weight``.  The
+        # compressed-tensors reload surface used by the bridge-free HF stream
+        # is selected explicitly in ``from_hf_stream`` below.
+        self._use_compressed_tensors_weight_names = False
+        if isinstance(qat_config, str):
+            self.qat_mode = qat_config
+            self._block_size = 32 if qat_config == "mxfp4" else 16
+            self._ignore_patterns = []
+            self._use_modelopt_fake_quant = True
+        else:
+            self.qat_mode = getattr(qat_config, "mode", "w4a16")
+            self._block_size = getattr(qat_config, "group_size", 32 if self.qat_mode == "mxfp4" else 16)
+            self._ignore_patterns = list(getattr(qat_config, "ignore_patterns", []))
+            self._use_modelopt_fake_quant = getattr(qat_config, "apply_modelopt_fake_quant", True)
+
     def __init__(
         self,
         actor_module: list,
         bridge: Any,
-        qat_mode: str = "w4a16",
+        qat_config: Any = "w4a16",
     ):
-        self.qat_mode = qat_mode
+        self._configure_export(qat_config)
         self._actor_module = actor_module
 
         self._registry = self._get_mapping_registry(bridge)
@@ -81,6 +173,35 @@ class QATWeightExporter:
         if self._ep_size > 1 and self._ep_group is not None:
             self._sync_metadata(self._ep_group)
 
+    @classmethod
+    def from_hf_stream(cls, qat_config: Any, model_config: Any = None) -> "QATWeightExporter":
+        """Build an export-only instance for an already HF-named BF16 stream.
+
+        This path intentionally has no Megatron module, bridge, or parallel-state
+        dependency. It is valid only when fake quantization is supplied by the
+        training backend and the explicit QAT config is authoritative.
+        """
+        exporter = cls.__new__(cls)
+        exporter._configure_export(qat_config)
+        exporter._use_compressed_tensors_weight_names = True
+        if exporter._use_modelopt_fake_quant:
+            raise ValueError(
+                "from_hf_stream requires apply_modelopt_fake_quant=False because "
+                "there is no ModelOpt module metadata to export"
+            )
+        exporter._actor_module = []
+        exporter._registry = None
+        exporter._pp_size = 1
+        exporter._pp_rank = 0
+        exporter._pp_group = None
+        exporter._ep_size = 1
+        exporter._ep_rank = 0
+        exporter._ep_group = None
+        exporter._config = model_config
+        exporter._num_local_experts = 0
+        exporter._metadata = {}
+        return exporter
+
     def process_weights_iterator(
         self,
         per_tensor_param: Iterator[tuple[str, torch.Tensor]],
@@ -91,18 +212,83 @@ class QATWeightExporter:
         quantized weight plus its scaling factors when the parameter is
         quantized, or the original tensor unchanged otherwise.
         """
+        pending_fused: dict[str, dict[str, tuple[str, torch.Tensor, _QuantMeta]]] = {}
+        pending_members: dict[str, tuple[str, ...]] = {}
+
         for hf_name, weight in per_tensor_param:
             if "_quantizer." in hf_name:
                 continue
             meta = self._resolve_quant_metadata(hf_name)
             if meta is None:
                 yield (hf_name, weight)
+            elif meta.qformat == QUANTIZATION_NVFP4:
+                fused = resolve_nvfp4_fused_global_scale_group(hf_name)
+                if fused is not None:
+                    group_key, members, projection = fused
+                    group = pending_fused.setdefault(group_key, {})
+                    pending_members[group_key] = members
+                    if projection in group:
+                        raise ValueError(f"duplicate NVFP4 fused global-scale member {hf_name}")
+                    group[projection] = (hf_name, weight, meta)
+                    if len(group) < len(members):
+                        continue
+
+                    block_sizes = {entry[2].block_size for entry in group.values()}
+                    if len(block_sizes) != 1:
+                        raise ValueError(
+                            f"NVFP4 fused global-scale group {group_key} has inconsistent block sizes: "
+                            f"{sorted(block_sizes)}"
+                        )
+                    group_amaxes = []
+                    for _, member_weight, member_meta in group.values():
+                        member_amax = (
+                            member_weight.detach().abs().amax()
+                            if member_meta.weight_amax is None
+                            else member_meta.weight_amax.to(member_weight.device).float().abs().amax()
+                        )
+                        group_amaxes.append(member_amax.float())
+                    shared_global_scale = (
+                        fuse_nvfp4_global_scales(group_amaxes, representation="divisor") / _NVFP4_AMAX_DENOMINATOR
+                    )
+
+                    for member in members:
+                        member_name, member_weight, member_meta = group[member]
+                        for exported_name, exported_tensor in self._quantize_nvfp4(
+                            member_name,
+                            member_weight,
+                            member_meta,
+                            weight_global_scale=shared_global_scale.to(member_weight.device),
+                        ):
+                            yield (self._checkpoint_parameter_name(exported_name), exported_tensor)
+                    del pending_fused[group_key]
+                    del pending_members[group_key]
+                    continue
+
+                for exported_name, exported_tensor in self._quantize_nvfp4(hf_name, weight, meta):
+                    yield (self._checkpoint_parameter_name(exported_name), exported_tensor)
+            elif meta.qformat == QUANTIZATION_MXFP4:
+                for exported_name, exported_tensor in self._quantize_mxfp4(hf_name, weight, meta):
+                    yield (self._checkpoint_parameter_name(exported_name), exported_tensor)
             else:
-                assert meta.qformat == QUANTIZATION_NVFP4, f"Unsupported qformat: {meta.qformat}"
-                yield from self._quantize_nvfp4(hf_name, weight, meta)
+                raise ValueError(f"Unsupported qformat: {meta.qformat}")
+
+        if pending_fused:
+            details = []
+            for group_key, group in pending_fused.items():
+                missing = [member for member in pending_members[group_key] if member not in group]
+                details.append(f"{group_key} missing={missing}")
+            raise ValueError(f"incomplete NVFP4 fused global-scale group(s): {'; '.join(details)}")
+
+    def _checkpoint_parameter_name(self, name: str) -> str:
+        """Select the loadable checkpoint parameter, not a transformed compute tensor."""
+        if getattr(self, "_use_compressed_tensors_weight_names", False) and name.endswith(".weight"):
+            return f"{name.removesuffix('.weight')}.{NVFP4_PACKED_WEIGHT_SUFFIX}"
+        return name
 
     @staticmethod
     def _get_mapping_registry(bridge):
+        if bridge is None:
+            return None
         return bridge._model_bridge.mapping_registry()
 
     @staticmethod
@@ -192,29 +378,140 @@ class QATWeightExporter:
         if not hf_name.endswith(".weight") or "norm" in hf_name:
             return None
 
-        for resolved in _iter_hf_to_megatron_matches(self._registry, hf_name):
-            meta = self._metadata.get(resolved.megatron_param)
-            if meta is not None:
-                return meta
+        if self._registry is not None:
+            for resolved in _iter_hf_to_megatron_matches(self._registry, hf_name):
+                meta = self._metadata.get(resolved.megatron_param)
+                if meta is not None:
+                    return meta
+
+        if not self._use_modelopt_fake_quant and not self._is_ignored(hf_name):
+            qformat = QUANTIZATION_MXFP4 if self.qat_mode == "mxfp4" else QUANTIZATION_NVFP4
+            return _QuantMeta(qformat=qformat, block_size=self._block_size, weight_amax=None)
 
         return None
+
+    def _is_ignored(self, hf_name: str) -> bool:
+        module_name = hf_name.removesuffix(".weight")
+        for pattern in self._ignore_patterns:
+            if pattern.startswith("re:"):
+                if re.search(pattern[3:], module_name):
+                    return True
+            elif pattern in module_name or fnmatch(module_name, pattern):
+                return True
+        return False
+
+    def _validate_logical_weight_shape(self, name: str, weight: torch.Tensor) -> None:
+        """Validate public HF projection axes against explicit model semantics.
+
+        This deliberately does not infer an attention width from ``hidden_size``.
+        Architectures may project ``num_attention_heads * head_dim`` values even
+        when that product differs from the residual width.
+        """
+        config = getattr(self, "_config", None)
+        if config is None or weight.ndim != 2:
+            return
+        config = getattr(config, "text_config", config)
+
+        def field(*names: str) -> Optional[int]:
+            for field_name in names:
+                value = getattr(config, field_name, None)
+                if value is not None:
+                    return int(value)
+            return None
+
+        hidden = field("hidden_size")
+        head_count = field("num_attention_heads")
+        # HF calls this head_dim; Megatron TransformerConfig calls it kv_channels.
+        head_dim = field("head_dim", "kv_channels")
+        kv_head_count = field("num_key_value_heads", "num_query_groups")
+        dense_intermediate = field("intermediate_size", "ffn_hidden_size")
+        moe_intermediate = field("moe_intermediate_size", "moe_ffn_hidden_size")
+        shared_intermediate = field("shared_expert_intermediate_size", "moe_shared_expert_intermediate_size")
+        vocab = field("vocab_size")
+
+        expected: Optional[tuple[int, int]] = None
+        source = ""
+        if name.endswith(".self_attn.o_proj.weight") and None not in (hidden, head_count, head_dim):
+            assert hidden is not None and head_count is not None and head_dim is not None
+            expected = (hidden, head_count * head_dim)
+            source = "hidden_size, num_attention_heads * head_dim"
+        elif name.endswith(".self_attn.q_proj.weight") and None not in (hidden, head_count, head_dim):
+            assert hidden is not None and head_count is not None and head_dim is not None
+            expected = (head_count * head_dim, hidden)
+            source = "num_attention_heads * head_dim, hidden_size"
+        elif name.endswith((".self_attn.k_proj.weight", ".self_attn.v_proj.weight")) and None not in (
+            hidden,
+            kv_head_count,
+            head_dim,
+        ):
+            assert hidden is not None and kv_head_count is not None and head_dim is not None
+            expected = (kv_head_count * head_dim, hidden)
+            source = "num_key_value_heads * head_dim, hidden_size"
+        elif ".mlp.experts." in name and name.endswith((".gate_proj.weight", ".up_proj.weight")):
+            if None not in (moe_intermediate, hidden):
+                assert moe_intermediate is not None and hidden is not None
+                expected = (moe_intermediate, hidden)
+                source = "moe_intermediate_size, hidden_size"
+        elif ".mlp.experts." in name and name.endswith(".down_proj.weight"):
+            if None not in (moe_intermediate, hidden):
+                assert moe_intermediate is not None and hidden is not None
+                expected = (hidden, moe_intermediate)
+                source = "hidden_size, moe_intermediate_size"
+        elif ".mlp.shared_expert." in name and name.endswith((".gate_proj.weight", ".up_proj.weight")):
+            if None not in (shared_intermediate, hidden):
+                assert shared_intermediate is not None and hidden is not None
+                expected = (shared_intermediate, hidden)
+                source = "shared_expert_intermediate_size, hidden_size"
+        elif ".mlp.shared_expert." in name and name.endswith(".down_proj.weight"):
+            if None not in (shared_intermediate, hidden):
+                assert shared_intermediate is not None and hidden is not None
+                expected = (hidden, shared_intermediate)
+                source = "hidden_size, shared_expert_intermediate_size"
+        elif ".mlp." in name and name.endswith((".gate_proj.weight", ".up_proj.weight")):
+            if None not in (dense_intermediate, hidden):
+                assert dense_intermediate is not None and hidden is not None
+                expected = (dense_intermediate, hidden)
+                source = "intermediate_size, hidden_size"
+        elif ".mlp." in name and name.endswith(".down_proj.weight"):
+            if None not in (dense_intermediate, hidden):
+                assert dense_intermediate is not None and hidden is not None
+                expected = (hidden, dense_intermediate)
+                source = "hidden_size, intermediate_size"
+        elif name in ("model.embed_tokens.weight", "lm_head.weight") and None not in (vocab, hidden):
+            assert vocab is not None and hidden is not None
+            expected = (vocab, hidden)
+            source = "vocab_size, hidden_size"
+
+        if expected is not None and tuple(weight.shape) != expected:
+            raise ValueError(
+                f"QAT logical weight semantic axis mismatch for {name}: "
+                f"source={source}, expected={expected}, actual={tuple(weight.shape)}"
+            )
 
     def _quantize_nvfp4(
         self,
         name: str,
         weight: torch.Tensor,
         meta: _QuantMeta,
+        *,
+        weight_global_scale: Optional[torch.Tensor] = None,
     ) -> Iterator[tuple[str, torch.Tensor]]:
         """NVFP4 two-level quantization.
 
         Produces up to four tensors:
           ``(name, packed_uint8_weight)``
           ``(weight_scale, per_block_fp8_scale)``
-          ``(weight_scale_2, global_scale_from_amax)``
-          ``(input_scale, activation_scale)`` -- only when available
+          ``(weight_global_scale, 1 / global_scale_from_amax)`` for a
+          compressed-tensors stream, otherwise the ModelOpt multiplier
+          ``(input_global_scale, 1 / activation_scale)`` under the same stream
+          contract -- only when available
         """
-        w_amax = meta.weight_amax.to(weight.device)
-        w_scale_2 = w_amax.float() / _NVFP4_AMAX_DENOMINATOR
+        self._validate_logical_weight_shape(name, weight)
+        if weight_global_scale is None:
+            w_amax = weight.detach().abs().amax() if meta.weight_amax is None else meta.weight_amax.to(weight.device)
+            w_scale_2 = w_amax.float() / _NVFP4_AMAX_DENOMINATOR
+        else:
+            w_scale_2 = weight_global_scale.to(device=weight.device, dtype=torch.float32)
 
         w_scale = NVFP4QTensor.get_weights_scaling_factor(
             weight,
@@ -223,14 +520,66 @@ class QATWeightExporter:
         )[0]
 
         quantized = to_quantized_weight(weight, w_scale, meta.qformat, w_scale_2, meta.block_size)
+        # Per-tensor scales have no projection axes.  Group scales carry the
+        # two-dimensional W2 contract and therefore make the conversion
+        # decidable without parameter-name heuristics.
+        if w_scale.ndim == 2:
+            quantized = _NVFP4_PACKED_LAYOUT.to_vllm_packed(
+                name, weight, quantized, w_scale, group_size=meta.block_size
+            )
 
         yield (name, quantized)
-        yield (_derive_scale_name(name, "weight_scale"), w_scale)
-        yield (_derive_scale_name(name, "weight_scale_2"), w_scale_2)
+        yield (_derive_scale_name(name, NVFP4_GROUP_SCALE_SUFFIX), w_scale)
+        checkpoint_weight_scale = w_scale_2
+        if getattr(self, "_use_compressed_tensors_weight_names", False):
+            checkpoint_weight_scale = _to_compressed_tensors_divisor(
+                w_scale_2,
+                parameter_name=_derive_scale_name(name, NVFP4_GLOBAL_SCALE_SUFFIX),
+            )
+        yield (_derive_scale_name(name, NVFP4_GLOBAL_SCALE_SUFFIX), checkpoint_weight_scale)
 
         input_scale = _compute_input_scale(meta)
         if input_scale is not None:
-            yield (_derive_scale_name(name, "input_scale"), input_scale)
+            if getattr(self, "_use_compressed_tensors_weight_names", False):
+                input_scale = _to_compressed_tensors_divisor(
+                    input_scale,
+                    parameter_name=_derive_scale_name(name, NVFP4_INPUT_SCALE_SUFFIX),
+                )
+            yield (_derive_scale_name(name, NVFP4_INPUT_SCALE_SUFFIX), input_scale)
+
+    def _quantize_mxfp4(
+        self,
+        name: str,
+        weight: torch.Tensor,
+        meta: _QuantMeta,
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        """OCP MXFP4 quantization with one E8M0 scale per 32 values.
+
+        Packing is always along the input (last) dimension. This preserves the
+        projection layout consumed by vLLM's fused MoE loader:
+        gate/up projections concatenate into ``w13`` while down projections
+        populate ``w2``.
+        """
+        self._validate_logical_weight_shape(name, weight)
+        if meta.block_size != 32:
+            raise ValueError(f"MXFP4 requires block size 32, got {meta.block_size}")
+        if weight.shape[-1] % meta.block_size != 0:
+            raise ValueError(
+                f"MXFP4 input dimension must be divisible by block size 32, got shape {tuple(weight.shape)}"
+            )
+
+        _, weight_scale = MXFP4QTensor.quantize(weight, meta.block_size)
+        scale_shape = (*weight.shape[:-1], weight.shape[-1] // meta.block_size)
+        weight_scale = weight_scale.reshape(scale_shape)
+        quantized = to_quantized_weight(
+            weight,
+            weight_scale,
+            meta.qformat,
+            block_size=meta.block_size,
+        )
+
+        yield (name, quantized)
+        yield (_derive_scale_name(name, "weight_scale"), weight_scale)
 
 
 def _iter_hf_to_megatron_matches(registry, hf_name: str):

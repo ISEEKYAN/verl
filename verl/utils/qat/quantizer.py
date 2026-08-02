@@ -36,6 +36,7 @@ from compressed_tensors.quantization.quant_args import (
 from compressed_tensors.quantization.utils.helpers import generate_gparam
 
 from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.qat.fused_scale_contract import NVFP4_FUSED_GLOBAL_SCALE_GROUPS, fuse_nvfp4_global_scales
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -74,13 +75,6 @@ def compute_blockwise_scale(
     return blockwise_scale
 
 
-# Fusion patterns for transformer models
-FUSE_PATTERNS = {
-    "qkv": ["q_proj", "k_proj", "v_proj"],
-    "gate_up": ["gate_proj", "up_proj"],
-}
-
-
 def fuse_global_scales(
     layer_global_scales: dict[str, torch.Tensor],
     strategy: str = "min",
@@ -99,12 +93,14 @@ def fuse_global_scales(
     processed = set()
 
     for parent, children in parent_to_children.items():
-        for _, patterns in FUSE_PATTERNS.items():
+        for patterns in NVFP4_FUSED_GLOBAL_SCALE_GROUPS.values():
             matched = [children[p] for p in patterns if p in children]
             if len(matched) == len(patterns):
                 group_scales = [layer_global_scales[n] for n in matched]
                 if strategy == "min":
-                    fused_scale = torch.min(torch.cat(group_scales)).reshape([1])
+                    fused_scale = fuse_nvfp4_global_scales(group_scales, representation="reciprocal_gparam").reshape(
+                        [1]
+                    )
                 else:
                     raise ValueError(f"Unknown fuse strategy: {strategy}")
                 for layer_name in matched:
@@ -130,6 +126,11 @@ class QATQuantizer:
         param_dtype: Optional[torch.dtype] = None,
     ):
         self.mode = mode.lower()
+        if self.mode not in {"w4a16", "w4a4"}:
+            raise ValueError(
+                "QATQuantizer only exports NVFP4 modes ('w4a16' and 'w4a4'); "
+                f"got {mode!r}. MXFP4 requires the ModelOpt QATWeightExporter."
+            )
         self._is_w4a4 = self.mode == "w4a4"  # W4A4 needs input_global_scale
         self.group_size = group_size
         self.ignore_patterns = ignore_patterns or ["lm_head", "embed_tokens", "re:.*mlp.gate$"]

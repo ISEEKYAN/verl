@@ -126,6 +126,11 @@ class QATQuantizer:
         param_dtype: Optional[torch.dtype] = None,
     ):
         self.mode = mode.lower()
+        if self.mode not in {"w4a16", "w4a4"}:
+            raise ValueError(
+                "QATQuantizer only exports NVFP4 modes ('w4a16' and 'w4a4'); "
+                f"got {mode!r}. MXFP4 requires the ModelOpt QATWeightExporter."
+            )
         self._is_w4a4 = self.mode == "w4a4"  # W4A4 needs input_global_scale
         self.group_size = group_size
         self.ignore_patterns = ignore_patterns or ["lm_head", "embed_tokens", "re:.*mlp.gate$"]

@@ -190,6 +190,7 @@ class QATMode(str, Enum):
 
     W4A4 = "w4a4"  # Weight 4-bit, Activation 4-bit (dynamic)
     W4A16 = "w4a16"  # Weight 4-bit, Activation 16-bit (weight only)
+    MXFP4 = "mxfp4"  # OCP MXFP4 export; activation path remains BF16
 
 
 class QATLinear(nn.Linear):

@@ -36,7 +36,7 @@ from compressed_tensors.quantization.quant_args import (
 from compressed_tensors.quantization.utils.helpers import generate_gparam
 
 from verl.utils.device import get_device_name, get_torch_device
-from verl.utils.qat.fused_scale_contract import NVFP4_FUSED_GLOBAL_SCALE_GROUPS
+from verl.utils.qat.fused_scale_contract import NVFP4_FUSED_GLOBAL_SCALE_GROUPS, fuse_nvfp4_global_scales
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -98,7 +98,9 @@ def fuse_global_scales(
             if len(matched) == len(patterns):
                 group_scales = [layer_global_scales[n] for n in matched]
                 if strategy == "min":
-                    fused_scale = torch.min(torch.cat(group_scales)).reshape([1])
+                    fused_scale = fuse_nvfp4_global_scales(group_scales, representation="reciprocal_gparam").reshape(
+                        [1]
+                    )
                 else:
                     raise ValueError(f"Unknown fuse strategy: {strategy}")
                 for layer_name in matched:

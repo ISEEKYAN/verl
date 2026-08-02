@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Projection groups that share one NVFP4 global scale in fused vLLM owners."""
+"""Projection groups and shared-scale policy for fused NVFP4 vLLM owners."""
 
 from typing import Optional
+
+import torch
 
 NVFP4_FUSED_GLOBAL_SCALE_GROUPS = {
     "qkv": ("q_proj", "k_proj", "v_proj"),
@@ -35,3 +37,21 @@ def resolve_nvfp4_fused_global_scale_group(name: str) -> Optional[tuple[str, tup
         if projection in members:
             return (f"{parent}:{group_name}", members, projection)
     return None
+
+
+def fuse_nvfp4_global_scales(scales: list[torch.Tensor], *, representation: str) -> torch.Tensor:
+    """Choose the common fused scale without silently mixing scale conventions.
+
+    FSDP stores the compressed-tensors reciprocal ``gparam``; ModelOpt's
+    exporter first holds its divisor (``amax / FP4*FP8``).  They represent the
+    same quantization policy, so the selected extrema are inverse: minimum for
+    reciprocal gparams and maximum for divisors.
+    """
+    if not scales:
+        raise ValueError("cannot fuse an empty NVFP4 global-scale group")
+    values = torch.stack([scale.float().reshape(-1).amax() for scale in scales])
+    if representation == "reciprocal_gparam":
+        return values.amin()
+    if representation == "divisor":
+        return values.amax()
+    raise ValueError(f"unknown NVFP4 global-scale representation: {representation}")

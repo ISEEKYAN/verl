@@ -39,7 +39,7 @@ from verl.utils.modelopt.dense_qkv_layout import (
     NVFP4_INPUT_SCALE_SUFFIX,
     NVFP4_PACKED_WEIGHT_SUFFIX,
 )
-from verl.utils.qat.fused_scale_contract import resolve_nvfp4_fused_global_scale_group
+from verl.utils.qat.fused_scale_contract import fuse_nvfp4_global_scales, resolve_nvfp4_fused_global_scale_group
 
 # NVFP4 two-level scaling denominator: FP4_MAX (6.0) * FP8_MAX (448.0).
 _NVFP4_AMAX_DENOMINATOR = 6.0 * 448.0
@@ -247,7 +247,9 @@ class QATWeightExporter:
                             else member_meta.weight_amax.to(member_weight.device).float().abs().amax()
                         )
                         group_amaxes.append(member_amax.float())
-                    shared_global_scale = torch.stack(group_amaxes).amax() / _NVFP4_AMAX_DENOMINATOR
+                    shared_global_scale = (
+                        fuse_nvfp4_global_scales(group_amaxes, representation="divisor") / _NVFP4_AMAX_DENOMINATOR
+                    )
 
                     for member in members:
                         member_name, member_weight, member_meta = group[member]
@@ -558,6 +560,7 @@ class QATWeightExporter:
         gate/up projections concatenate into ``w13`` while down projections
         populate ``w2``.
         """
+        self._validate_logical_weight_shape(name, weight)
         if meta.block_size != 32:
             raise ValueError(f"MXFP4 requires block size 32, got {meta.block_size}")
         if weight.shape[-1] % meta.block_size != 0:

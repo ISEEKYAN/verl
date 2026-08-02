@@ -252,7 +252,8 @@ class vLLMColocateWorkerExtension:
         elif self._is_modelopt_qat:
             from verl.utils.modelopt.vllm_modelopt_patch import prepare_modelopt_for_weight_reload
 
-            prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
+            for model in self._iter_all_models():
+                prepare_modelopt_for_weight_reload(model, device=self.device)
             logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
         elif peft_config and base_sync_done:
             # In async mode, make sure the old lora is removed before adding the new one
@@ -295,7 +296,8 @@ class vLLMColocateWorkerExtension:
         elif self._is_modelopt_qat:
             from verl.utils.modelopt.vllm_modelopt_patch import modelopt_process_weights_after_loading
 
-            modelopt_process_weights_after_loading(self.model_runner.model)
+            for model in self._iter_all_models():
+                modelopt_process_weights_after_loading(model)
             logger.info("ModelOpt QAT: process_weights_after_loading completed")
         elif peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")

@@ -21,6 +21,7 @@ from torch.nested._internal.nested_tensor import NestedTensor
 from verl.utils.megatron_utils import unwrap_model
 from verl.workers.config import MtpConfig
 
+from .thd_preprocess import build_thd_preprocess_options
 from .util import (
     build_vlm_attn_mask_bshd,
     build_vlm_attn_mask_thd,
@@ -274,6 +275,7 @@ def gptmodel_forward_model_engine(
     mtp_enable_train: bool = False,
     local_cp_size: Optional[int] = None,
     forced_max_seqlen: Optional[int] = None,
+    cp_layout: str = "zigzag",
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -283,6 +285,11 @@ def gptmodel_forward_model_engine(
 
     fp8 = unwrap_model(model).config.fp8
     use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+    thd_preprocess_options = build_thd_preprocess_options(
+        unwrap_model(model).config,
+        cp_layout=cp_layout,
+        local_cp_size=local_cp_size,
+    )
 
     model_kwargs = {}
     if "pixel_values" in multi_modal_inputs:
@@ -299,8 +306,7 @@ def gptmodel_forward_model_engine(
         input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
             input_ids,
             pre_process=pre_process or (post_process and mtp_enable_train),
-            use_fp8_padding=use_fp8_padding,
-            local_cp_size=local_cp_size,
+            **thd_preprocess_options,
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
@@ -322,8 +328,7 @@ def gptmodel_forward_model_engine(
                     v,
                     pre_process=True,
                     need_roll=True,
-                    use_fp8_padding=use_fp8_padding,
-                    local_cp_size=local_cp_size,
+                    **thd_preprocess_options,
                 )[0]
 
             model_kwargs["labels"] = args["label"].contiguous()
@@ -353,15 +358,20 @@ def gptmodel_forward_model_engine(
                     v,
                     pre_process=True,
                     need_roll=(k == "label"),
-                    use_fp8_padding=use_fp8_padding,
-                    local_cp_size=local_cp_size,
+                    **thd_preprocess_options,
                 )[0]
                 for k, v in logits_processor_args.items()
             }
             output_dict = logits_processor(output_orig, **args)
             output = {
                 k: postprocess_thd_engine(
-                    v, packed_seq_params, input_ids, batch_size, post_process=post_process, local_cp_size=local_cp_size
+                    v,
+                    packed_seq_params,
+                    input_ids,
+                    batch_size,
+                    post_process=post_process,
+                    local_cp_size=local_cp_size,
+                    cp_layout=cp_layout,
                 )
                 for k, v in output_dict.items()
             }
@@ -373,6 +383,7 @@ def gptmodel_forward_model_engine(
                 batch_size,
                 post_process=post_process,
                 local_cp_size=local_cp_size,
+                cp_layout=cp_layout,
             )
     else:
         """

@@ -49,7 +49,8 @@ def _make_engine_stub():
 
 
 def _make_logits_processor(keys):
-    def _proc(student_logits, data, data_format):
+    def _proc(student_logits, data, data_format, cp_layout):
+        assert cp_layout == "contiguous"
         n = student_logits.shape[1]
         return {k: torch.full((1, n), float(i + 1)) for i, k in enumerate(keys)}
 
@@ -78,6 +79,7 @@ def _run_logits_processor(eng, *, distillation_use_topk, distillation_only):
             logits_processor_func=_make_logits_processor(_DISTILLATION_KEYS),
             batch=batch,
             data_format="thd",
+            cp_layout="contiguous",
         )
 
     return mock_log_probs, ret, total_nnz

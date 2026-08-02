@@ -126,6 +126,7 @@ def compute_topk_loss(
     data: TensorDict,
     student_logits: torch.Tensor,
     data_format: str,
+    cp_layout: str = "zigzag",
 ) -> torch.Tensor:
     """Compute the topk loss in logit processor.
 
@@ -147,13 +148,16 @@ def compute_topk_loss(
         case _:
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
 
-    outputs = distillation_loss_fn(
+    loss_kwargs = dict(
         student_logits=student_logits,
         teacher_topk_log_probs=data["teacher_logprobs"],
         teacher_topk_ids=data["teacher_ids"],
         config=distillation_config,
         data_format=data_format,
     )
+    if config.strategy == "megatron":
+        loss_kwargs["cp_layout"] = cp_layout
+    outputs = distillation_loss_fn(**loss_kwargs)
 
     expected_shape = student_logits.shape[:2]
     for k, v in outputs.items():
@@ -170,6 +174,7 @@ def distillation_ppo_loss(
     dp_group=None,
     student_logits: torch.Tensor = None,
     data_format: str = "thd",
+    cp_layout: str = "zigzag",
 ):
     """Loss function used both for logit processor and final policy loss.
     - student_logits is not None, compute the topk loss in logit processor.
@@ -202,7 +207,7 @@ def distillation_ppo_loss(
 
     # Called as logits processor
     if student_logits is not None:
-        return compute_topk_loss(config, distillation_config, data, student_logits, data_format)
+        return compute_topk_loss(config, distillation_config, data, student_logits, data_format, cp_layout)
 
     # Called as final policy loss
     distillation_loss_config = distillation_config.distillation_loss

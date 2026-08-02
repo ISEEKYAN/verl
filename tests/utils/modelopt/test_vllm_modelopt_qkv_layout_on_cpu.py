@@ -134,6 +134,49 @@ class _CurrentCompressedDenseRowParallelModel(_DenseRowParallelModel):
         }
 
 
+def _vllm_v023_default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+    """Mirror vLLM v0.23.0's exact default loader shape contract.
+
+    Source: vllm-project/vllm@0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665,
+    ``vllm/model_executor/model_loader/weight_utils.py``.
+    """
+    if param.numel() == 1 and loaded_weight.numel() == 1:
+        param.data.copy_(loaded_weight.view(param.shape))
+    else:
+        assert param.size() == loaded_weight.size(), (
+            f"Attempted to load weight ({loaded_weight.size()}) into parameter ({param.size()})"
+        )
+        param.data.copy_(loaded_weight)
+
+
+def test_observed_default_loader_shape_counterexample_is_restored_before_load():
+    """Exercise the observed default-loader failure, not RowParallelLinear's loader."""
+    model = _DenseRowParallelModel()
+    model.o_proj.input_size = 4096
+    model.o_proj.output_size = 2048
+    model.o_proj.output_size_per_partition = 2048
+    model.o_proj.weight = torch.nn.Parameter(torch.empty(256, 4096, dtype=torch.int32), requires_grad=False)
+    model.o_proj._hf_param_meta["weight"]["shape"] = (2048, 2048)
+    source = torch.zeros(2048, 2048, dtype=torch.uint8)
+
+    with pytest.raises(
+        AssertionError,
+        match=r"Attempted to load weight.*2048, 2048.*into parameter.*256, 4096",
+    ):
+        _vllm_v023_default_weight_loader(model.o_proj.weight, source)
+
+    [(name, loaded)] = prepare_modelopt_nvfp4_weight_stream(
+        model,
+        [("model.layers.0.self_attn.o_proj.weight", source)],
+    )
+
+    assert name == "model.layers.0.self_attn.o_proj.weight"
+    assert model.o_proj.weight.shape == (2048, 2048)
+    assert model.o_proj.weight.dtype == torch.uint8
+    assert not hasattr(model.o_proj.weight, "weight_loader")
+    _vllm_v023_default_weight_loader(model.o_proj.weight, loaded)
+
+
 def test_row_parallel_loader_restores_checkpoint_layout_and_public_axis_contract():
     model = _DenseRowParallelModel()
     source = torch.arange(1024, dtype=torch.int32).view(1024, 1).expand(1024, 2048).to(torch.uint8)

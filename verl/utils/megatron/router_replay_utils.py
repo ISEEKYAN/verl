@@ -35,6 +35,7 @@ from megatron.core.tensor_parallel import gather_from_sequence_parallel_region, 
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
+from verl.models.mcore.thd_preprocess import build_thd_preprocess_options
 from verl.models.mcore.util import (
     postprocess_packed_seqs,
     postprocess_thd_engine,
@@ -217,7 +218,14 @@ def get_moe_num_layers_to_build(
 
 
 def merge_router_topk_indices(
-    attention_mask, input_ids, mini_layer_topk_idx_list, tf_config, vp_rank=None, *, cp_layout="zigzag"
+    attention_mask,
+    input_ids,
+    mini_layer_topk_idx_list,
+    tf_config,
+    vp_rank=None,
+    *,
+    cp_layout="zigzag",
+    local_cp_size=None,
 ):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
@@ -234,6 +242,7 @@ def merge_router_topk_indices(
         vp_rank (Optional[int]): Virtual pipeline stage rank override. If None, the current VP rank from
             Megatron parallel state will be used.
         cp_layout (str): Context-parallel token layout shared with the model forward path.
+        local_cp_size (Optional[int]): Dynamic context-parallel group size shared with model forward.
 
     Returns:
         None: The function has side effects only; it appends a tensor of shape
@@ -254,22 +263,19 @@ def merge_router_topk_indices(
             .contiguous()
         )
 
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
-        min_local_rows = (
-            tf_config.csa_window_size
-            if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
-            else None
+        thd_preprocess_options = build_thd_preprocess_options(
+            tf_config,
+            cp_layout=cp_layout,
+            local_cp_size=local_cp_size,
         )
+        use_fp8_padding = thd_preprocess_options["use_fp8_padding"]
 
         if input_ids.is_nested:
             batch_size = input_ids.shape[0]
             _, packed_seq_params, _ = preprocess_thd_engine(
                 input_ids,
                 pre_process=True,
-                use_fp8_padding=use_fp8_padding,
-                min_local_rows=min_local_rows,
-                cp_layout=cp_layout,
+                **thd_preprocess_options,
             )
             layers_topk_idx = postprocess_thd_engine(
                 layers_topk_idx,
@@ -277,6 +283,7 @@ def merge_router_topk_indices(
                 input_ids,
                 batch_size,
                 post_process=True,
+                local_cp_size=local_cp_size,
                 cp_layout=cp_layout,
             )
         else:
@@ -317,6 +324,7 @@ def set_router_replay_data(
     replay_mask=None,
     *,
     cp_layout="zigzag",
+    local_cp_size=None,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -335,35 +343,31 @@ def set_router_replay_data(
         replay_mask (Optional[torch.Tensor]): Optional per-token mask. Masked tokens use replayed routes;
             unmasked tokens keep native Megatron routes.
         cp_layout (str): Context-parallel token layout shared with the model forward path.
+        local_cp_size (Optional[int]): Dynamic context-parallel group size shared with model forward.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
     """
     with torch.no_grad():
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
-        min_local_rows = (
-            tf_config.csa_window_size
-            if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
-            else None
+        thd_preprocess_options = build_thd_preprocess_options(
+            tf_config,
+            cp_layout=cp_layout,
+            local_cp_size=local_cp_size,
         )
+        use_fp8_padding = thd_preprocess_options["use_fp8_padding"]
 
         replay_mask_rmpad = None
         if layers_topk_idx.is_nested:
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
                 layers_topk_idx,
                 pre_process=True,
-                use_fp8_padding=use_fp8_padding,
-                min_local_rows=min_local_rows,
-                cp_layout=cp_layout,
+                **thd_preprocess_options,
             )
             if replay_mask is not None:
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
                     replay_mask,
                     pre_process=True,
-                    use_fp8_padding=use_fp8_padding,
-                    min_local_rows=min_local_rows,
-                    cp_layout=cp_layout,
+                    **thd_preprocess_options,
                 )
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(

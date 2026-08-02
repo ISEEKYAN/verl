@@ -29,6 +29,7 @@ from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
 
+from verl.models.mcore.thd_preprocess import build_thd_preprocess_options
 from verl.models.mcore.util import preprocess_packed_seqs, preprocess_thd_engine
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
@@ -151,19 +152,13 @@ def fused_forward_model_engine(vision_model: bool = False):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
 
-        fp8 = unwrap_model(model).config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
         config = unwrap_model(model).config
-        min_local_rows = (
-            config.csa_window_size if getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid" else None
-        )
+        thd_preprocess_options = build_thd_preprocess_options(config, cp_layout=cp_layout)
 
         input_ids_rmpad, packed_seq_params, _ = preprocess_thd_engine(
             input_ids,
             pre_process=pre_process,
-            use_fp8_padding=use_fp8_padding,
-            min_local_rows=min_local_rows,
-            cp_layout=cp_layout,
+            **thd_preprocess_options,
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
@@ -190,9 +185,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             labels,
             pre_process=True,
             need_roll=True,
-            use_fp8_padding=use_fp8_padding,
-            min_local_rows=min_local_rows,
-            cp_layout=cp_layout,
+            **thd_preprocess_options,
         )
         labels_rmpad = labels_rmpad.contiguous()
         output_orig: CausalLMOutputForPPO = model(

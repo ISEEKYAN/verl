@@ -20,6 +20,8 @@ from pathlib import Path
 
 import torch
 
+_SHARED_THD_OPTION_NAMES = {"cp_layout", "local_cp_size", "min_local_rows", "use_fp8_padding"}
+
 
 def _module(name, **attrs):
     module = types.ModuleType(name)
@@ -30,8 +32,7 @@ def _module(name, **attrs):
 
 def _load_router_replay_utils(monkeypatch, observed_layouts):
     def preprocess(value, *, cp_layout="zigzag", **kwargs):
-        del kwargs
-        observed_layouts.append(("preprocess", cp_layout))
+        observed_layouts.append(("preprocess", cp_layout, kwargs.get("min_local_rows")))
         rows = sum(row.shape[0] for row in value.unbind())
         return torch.zeros(1, rows, 1, 1), object(), None
 
@@ -55,6 +56,19 @@ def _load_router_replay_utils(monkeypatch, observed_layouts):
     transformer_config = _module("megatron.core.transformer.transformer_config", TransformerConfig=object)
     transformer_layer = _module(
         "megatron.core.transformer.transformer_layer", get_transformer_layer_offset=lambda *args, **kwargs: 0
+    )
+    thd_preprocess = _module(
+        "verl.models.mcore.thd_preprocess",
+        build_thd_preprocess_options=lambda config, *, cp_layout, local_cp_size=None: {
+            "use_fp8_padding": config.fp8 in ["e4m3", "hybrid"],
+            "local_cp_size": local_cp_size,
+            "min_local_rows": (
+                config.csa_window_size
+                if getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid"
+                else None
+            ),
+            "cp_layout": cp_layout,
+        },
     )
     mcore_util = _module(
         "verl.models.mcore.util",
@@ -80,6 +94,7 @@ def _load_router_replay_utils(monkeypatch, observed_layouts):
         "megatron.core.transformer": _module("megatron.core.transformer"),
         "megatron.core.transformer.transformer_config": transformer_config,
         "megatron.core.transformer.transformer_layer": transformer_layer,
+        "verl.models.mcore.thd_preprocess": thd_preprocess,
         "verl.models.mcore.util": mcore_util,
         "verl.utils.megatron.router_replay_patch": router_patch,
     }
@@ -108,6 +123,23 @@ def _nested_routes():
     return torch.nested.as_nested_tensor(
         [torch.zeros(3, 1, 1, dtype=torch.long), torch.zeros(2, 1, 1, dtype=torch.long)], layout=torch.jagged
     )
+
+
+def test_dsv4_thd_preprocess_options_are_built_as_one_bundle(monkeypatch):
+    util = _module("verl.models.mcore.util", ContextParallelLayout=str)
+    monkeypatch.setitem(sys.modules, "verl.models.mcore.util", util)
+    path = Path(__file__).parents[2] / "verl" / "models" / "mcore" / "thd_preprocess.py"
+    spec = importlib.util.spec_from_file_location("verl.models.mcore.thd_preprocess_options_regression", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    config = types.SimpleNamespace(fp8="hybrid", csa_window_size=128, experimental_attention_variant="dsv4_hybrid")
+
+    assert module.build_thd_preprocess_options(config, cp_layout="contiguous", local_cp_size=4) == {
+        "use_fp8_padding": True,
+        "local_cp_size": 4,
+        "min_local_rows": 128,
+        "cp_layout": "contiguous",
+    }
 
 
 def test_dsv4_thd_router_replay_preserves_contiguous_cp_layout(monkeypatch):
@@ -142,9 +174,9 @@ def test_dsv4_thd_router_replay_preserves_contiguous_cp_layout(monkeypatch):
     )
 
     assert observed_layouts == [
-        ("preprocess", "contiguous"),
-        ("preprocess", "contiguous"),
-        ("preprocess", "contiguous"),
+        ("preprocess", "contiguous", 1),
+        ("preprocess", "contiguous", 1),
+        ("preprocess", "contiguous", 1),
         ("postprocess", "contiguous"),
     ]
 
@@ -164,6 +196,8 @@ def test_engine_passes_its_single_cp_layout_source_to_both_replay_directions():
     for call in calls:
         cp_layout = next(keyword.value for keyword in call.keywords if keyword.arg == "cp_layout")
         assert isinstance(cp_layout, ast.Name) and cp_layout.id == "cp_layout"
+        local_cp_size = next(keyword.value for keyword in call.keywords if keyword.arg == "local_cp_size")
+        assert isinstance(local_cp_size, ast.Name) and local_cp_size.id == "local_cp_size"
 
 
 def test_all_production_thd_layout_calls_are_explicit():
@@ -177,7 +211,59 @@ def test_all_production_thd_layout_calls_are_explicit():
             name = node.func.id if isinstance(node.func, ast.Name) else None
             if name not in {"preprocess_thd_engine", "postprocess_thd_engine"}:
                 continue
-            if not any(keyword.arg == "cp_layout" for keyword in node.keywords):
+            has_layout = any(keyword.arg == "cp_layout" for keyword in node.keywords)
+            expands_shared_options = any(
+                keyword.arg is None
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id == "thd_preprocess_options"
+                for keyword in node.keywords
+            )
+            if not has_layout and not expands_shared_options:
                 missing.append(f"{path.relative_to(root.parent)}:{node.lineno}")
 
     assert missing == []
+
+
+def _find_unshared_thd_preprocess_calls(source_by_path):
+    unshared = []
+    for path, source in source_by_path.items():
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "preprocess_thd_engine"
+            ):
+                continue
+            keyword_names = {keyword.arg for keyword in node.keywords}
+            expands_shared_options = any(
+                keyword.arg is None
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id == "thd_preprocess_options"
+                for keyword in node.keywords
+            )
+            manually_passed = keyword_names & _SHARED_THD_OPTION_NAMES
+            if not expands_shared_options or manually_passed:
+                unshared.append(f"{path}:{node.lineno}")
+    return unshared
+
+
+def test_router_replay_and_forward_cannot_diverge_on_thd_preprocess_options():
+    root = Path(__file__).parents[2]
+    paths = [
+        root / "verl" / "models" / "mcore" / "model_forward.py",
+        root / "verl" / "models" / "mcore" / "model_forward_fused.py",
+        root / "verl" / "utils" / "megatron" / "router_replay_utils.py",
+    ]
+    sources = {path.relative_to(root): path.read_text() for path in paths}
+
+    assert _find_unshared_thd_preprocess_calls(sources) == []
+
+
+def test_thd_preprocess_option_audit_rejects_missing_forward_bundle():
+    source = """
+preprocess_thd_engine(value, **thd_preprocess_options)
+preprocess_thd_engine(value, cp_layout=cp_layout, use_fp8_padding=use_fp8_padding)
+"""
+
+    assert _find_unshared_thd_preprocess_calls({"fault_injected_forward.py": source}) == ["fault_injected_forward.py:3"]

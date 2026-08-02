@@ -1102,6 +1102,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 vp_rank,
                 replay_mask=replay_mask,
                 cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
             )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
@@ -1198,6 +1199,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 self.tf_config,
                 vp_rank,
                 cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
             )
 
         # Router replay: switch to backward replay mode for next backward pass

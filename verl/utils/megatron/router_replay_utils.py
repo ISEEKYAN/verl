@@ -216,7 +216,9 @@ def get_moe_num_layers_to_build(
     return num_moe_layers
 
 
-def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_list, tf_config, vp_rank=None):
+def merge_router_topk_indices(
+    attention_mask, input_ids, mini_layer_topk_idx_list, tf_config, vp_rank=None, *, cp_layout="zigzag"
+):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
     then pack/unpack them to align with the original (batch, seq_len) layout and append the result.
@@ -231,6 +233,7 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
             the current micro-batch.
         vp_rank (Optional[int]): Virtual pipeline stage rank override. If None, the current VP rank from
             Megatron parallel state will be used.
+        cp_layout (str): Context-parallel token layout shared with the model forward path.
 
     Returns:
         None: The function has side effects only; it appends a tensor of shape
@@ -266,9 +269,15 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
                 min_local_rows=min_local_rows,
+                cp_layout=cp_layout,
             )
             layers_topk_idx = postprocess_thd_engine(
-                layers_topk_idx, packed_seq_params, input_ids, batch_size, post_process=True
+                layers_topk_idx,
+                packed_seq_params,
+                input_ids,
+                batch_size,
+                post_process=True,
+                cp_layout=cp_layout,
             )
         else:
             batch_size, seq_len = attention_mask.shape[:2]
@@ -306,6 +315,8 @@ def set_router_replay_data(
     tf_config,
     vp_rank=None,
     replay_mask=None,
+    *,
+    cp_layout="zigzag",
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -323,6 +334,7 @@ def set_router_replay_data(
             Megatron parallel state will be used.
         replay_mask (Optional[torch.Tensor]): Optional per-token mask. Masked tokens use replayed routes;
             unmasked tokens keep native Megatron routes.
+        cp_layout (str): Context-parallel token layout shared with the model forward path.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -343,6 +355,7 @@ def set_router_replay_data(
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
                 min_local_rows=min_local_rows,
+                cp_layout=cp_layout,
             )
             if replay_mask is not None:
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
@@ -350,6 +363,7 @@ def set_router_replay_data(
                     pre_process=True,
                     use_fp8_padding=use_fp8_padding,
                     min_local_rows=min_local_rows,
+                    cp_layout=cp_layout,
                 )
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(

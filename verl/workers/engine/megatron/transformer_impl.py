@@ -994,6 +994,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         logits_processor_func: Callable,
         batch: TensorDict,
         data_format: str,
+        cp_layout: str,
     ):
         assert logits.shape[:2] == label.shape[:2]
         # avoid non-positive temperature such as padding
@@ -1027,7 +1028,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
         if distillation_use_topk:
-            ret.update(logits_processor_func(student_logits=logits_bak, data=batch, data_format=data_format))
+            ret.update(
+                logits_processor_func(
+                    student_logits=logits_bak,
+                    data=batch,
+                    data_format=data_format,
+                    cp_layout=cp_layout,
+                )
+            )
         if not distillation_only:
             ret["log_probs"] = vocab_parallel_log_probs_from_logits(logits_bak, label)
 
@@ -1093,6 +1101,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 self.tf_config,
                 vp_rank,
                 replay_mask=replay_mask,
+                cp_layout=cp_layout,
             )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
@@ -1152,6 +1161,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 logits_processor_func=logits_processor_func,
                 batch=batch,
                 data_format=data_format,
+                cp_layout=cp_layout,
             )
 
             response_attention_mask = None
@@ -1181,7 +1191,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         # Router replay: record routing decisions for R2 mode
         if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
-            merge_router_topk_indices(None, input_ids, self.mini_layer_topk_idx_list, self.tf_config, vp_rank)
+            merge_router_topk_indices(
+                None,
+                input_ids,
+                self.mini_layer_topk_idx_list,
+                self.tf_config,
+                vp_rank,
+                cp_layout=cp_layout,
+            )
 
         # Router replay: switch to backward replay mode for next backward pass
         if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):

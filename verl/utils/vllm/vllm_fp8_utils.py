@@ -24,9 +24,10 @@ from packaging import version
 
 try:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-    from vllm.model_executor.layers.linear import LinearBase
-except ImportError as e:
-    raise ImportError("FP8 quantization not available") from e
+except ImportError:
+    FusedMoE = None
+
+from vllm.model_executor.layers.linear import LinearBase
 
 from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 from verl.utils.vllm.vllm_dsv4_fp8_utils import (
@@ -39,6 +40,13 @@ from verl.utils.vllm.vllm_dsv4_fp8_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_FUSED_MOE_UNAVAILABLE = "The current vLLM version does not provide FusedMoE; FP8 quantization is unavailable."
+
+
+def _require_fused_moe() -> None:
+    if FusedMoE is None:
+        raise RuntimeError(_FUSED_MOE_UNAVAILABLE)
 
 
 def _get_vllm_version():
@@ -81,8 +89,10 @@ def is_fp8_model(vllm_config):
 
     if hasattr(vllm_config, "quant_config"):
         if isinstance(vllm_config.quant_config, Fp8Config):
+            _require_fused_moe()
             return True
         elif is_mxfp8_vllm_ascend(vllm_config.quant_config):
+            _require_fused_moe()
             return True
 
     return False
@@ -96,7 +106,10 @@ def is_fp8_model(vllm_config):
 # classes once so ``isinstance`` checks keep working across vLLM versions --
 # calling ``isinstance(x, FusedMoE)`` when ``FusedMoE`` is a function raises
 # ``TypeError: isinstance() arg 2 must be a type``.
-if isinstance(FusedMoE, type):
+if FusedMoE is None:
+    _MOE_STOP_CLASSES = ()
+    _EXPERT_WEIGHT_CLASSES = ()
+elif isinstance(FusedMoE, type):
     # vLLM < 0.24: ``FusedMoE`` is itself the expert-weight-holding module.
     _MOE_STOP_CLASSES = (FusedMoE,)
     _EXPERT_WEIGHT_CLASSES = (FusedMoE,)
@@ -268,6 +281,7 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         Tuples of (name, tensor) for each weight and its scale
     """
 
+    _require_fused_moe()
     if is_deepseek_v4_model(model):
         yield from iter_deepseek_v4_weights(weights)
         return
@@ -333,6 +347,7 @@ def process_quanted_weights_after_loading(model, reload_state):
 
 
 def load_quanted_weights(weights, model_runner, is_drafter=False):
+    _require_fused_moe()
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
@@ -541,6 +556,7 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
 
 
 def apply_vllm_fp8_patches():
+    _require_fused_moe()
     logger.info("Applying vllm fp8 patches for blockwise quantization")
     vllm_ver = _get_vllm_version()
     if fp8_state.vllm_patches:

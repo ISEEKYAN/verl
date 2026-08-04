@@ -29,6 +29,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -39,14 +40,15 @@ def _make_module(name: str) -> types.ModuleType:
     return types.ModuleType(name)
 
 
-def _load_fp8_utils(fused_moe_is_function: bool):
+def _load_fp8_utils(fused_moe_is_function: bool | None):
     """Load ``vllm_fp8_utils`` with vLLM/verl heavyweight deps stubbed.
 
     Args:
         fused_moe_is_function: when True, emulate vLLM >= 0.24 where ``FusedMoE``
             is a factory function and the expert weights live on ``RoutedExperts``
             owned by a ``MoERunner``. When False, emulate vLLM < 0.24 where
-            ``FusedMoE`` is the ``nn.Module`` class holding the weights.
+            ``FusedMoE`` is the ``nn.Module`` class holding the weights. When
+            None, emulate a vLLM build that does not export ``FusedMoE``.
 
     Returns:
         (module, namespace) where ``namespace`` exposes the fake classes used to
@@ -87,7 +89,7 @@ def _load_fp8_utils(fused_moe_is_function: bool):
         fused_moe_pkg.RoutedExperts = _FakeRoutedExperts
         fused_moe_pkg.MoERunner = _FakeMoERunner
         ns.update(RoutedExperts=_FakeRoutedExperts, MoERunner=_FakeMoERunner)
-    else:
+    elif fused_moe_is_function is False:
 
         class _FakeFusedMoE(torch.nn.Module):
             def __init__(self, dtype=torch.float8_e4m3fn):
@@ -236,3 +238,16 @@ def test_old_vllm_fusedmoe_class_still_supported():
     mod.fp8_state.seen_params.clear()
     mod.fp8_state.fp8_param_names.clear()
     assert mod.is_fp8_weight("model.layers.0.mlp.experts.0.gate_proj.weight", model) is True
+
+
+def test_missing_fusedmoe_allows_non_fp8_import():
+    mod, _ = _load_fp8_utils(fused_moe_is_function=None)
+
+    assert mod.FusedMoE is None
+
+
+def test_missing_fusedmoe_fails_loud_on_fp8_path():
+    mod, _ = _load_fp8_utils(fused_moe_is_function=None)
+
+    with pytest.raises(RuntimeError, match="current vLLM version does not provide FusedMoE"):
+        list(mod.quant_weights([], model=None, quant_config=None))

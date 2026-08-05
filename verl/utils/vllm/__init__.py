@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+from .kimi_k3_mla_patch import apply_kimi_k3_mla_patch
 from .npu_vllm_patch import apply_npu_vllm_patches
 from .utils import TensorLoRARequest, VLLMHijack, is_version_ge
 
@@ -24,6 +25,9 @@ from .utils import TensorLoRARequest, VLLMHijack, is_version_ge
 # Apply NPU-specific vLLM patches when this module is imported.
 # Remove this when https://github.com/vllm-project/vllm-ascend/issues/5915 is fixed.
 apply_npu_vllm_patches()
+
+# Apply the Kimi-K3 disabled-DCP fix before a vLLM engine is created.
+apply_kimi_k3_mla_patch()
 
 __all__ = [
     "TensorLoRARequest",

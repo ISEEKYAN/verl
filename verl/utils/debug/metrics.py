@@ -11,7 +11,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
+import os
 
 import torch
 
@@ -58,6 +60,51 @@ def pearson_correlation_coefficient(tensor1: torch.Tensor, tensor2: torch.Tensor
 def calculate_log_prob_diff(log_probs1: torch.Tensor, log_probs2: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     full_diff = torch.abs(log_probs1 - log_probs2)
     return torch.masked_select(full_diff, mask)
+
+
+def _dump_train_infer_diff(
+    *,
+    rollout_log_probs: torch.Tensor,
+    actor_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    responses: torch.Tensor,
+) -> None:
+    path = os.environ.get("VERL_TRAIN_INFER_DIFF_DUMP")
+    if not path:
+        return
+    rollout = rollout_log_probs.detach().float().cpu()
+    actor = actor_log_probs.detach().float().cpu()
+    mask = response_mask.detach().bool().cpu()
+    tokens = responses.detach().cpu()
+    samples = []
+    for index in range(rollout.shape[0]):
+        valid = mask[index]
+        rollout_values = rollout[index][valid]
+        actor_values = actor[index][valid]
+        logprob_diff = (rollout_values - actor_values).abs()
+        probability_diff = (rollout_values.exp() - actor_values.exp()).abs()
+        samples.append(
+            {
+                "sample_index": index,
+                "token_ids": tokens[index][valid].tolist(),
+                "rollout_log_probs": rollout_values.tolist(),
+                "actor_log_probs": actor_values.tolist(),
+                "logprob_abs_diff": logprob_diff.tolist(),
+                "probability_abs_diff": probability_diff.tolist(),
+                "bitwise_equal_count": int(torch.eq(rollout_values, actor_values).sum()),
+                "valid_token_count": int(valid.sum()),
+            }
+        )
+    record = {
+        "schema_version": 1,
+        "shape": list(rollout.shape),
+        "samples": samples,
+    }
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
 def calculate_debug_metrics(data: DataProto) -> dict:
@@ -112,6 +159,12 @@ def calculate_debug_metrics(data: DataProto) -> dict:
 
     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
     rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
+    _dump_train_infer_diff(
+        rollout_log_probs=rollout_old_log_probs,
+        actor_log_probs=actor_old_log_probs,
+        response_mask=response_mask_bool,
+        responses=responses,
+    )
     return {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),

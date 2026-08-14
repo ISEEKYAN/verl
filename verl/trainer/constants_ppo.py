@@ -116,7 +116,13 @@ def get_ppo_ray_runtime_env(config=None):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
     # Always forward these at call-time, not import-time.
-    for key in ("VERL_FULL_DETERMINISM", "VLLM_BATCH_INVARIANT", "VERL_RL_INSIGHT_ENABLE"):
+    for key in (
+        "VERL_FULL_DETERMINISM",
+        "VLLM_BATCH_INVARIANT",
+        "VERL_RL_INSIGHT_ENABLE",
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+        "VERL_MLITE_SKIP_RUNTIME_PATCHES",
+    ):
         runtime_env["env_vars"][key] = os.environ.get(key, "0")
     # Forward only when set: empty string breaks vLLM ParallelConfig int parsing.
     for key in (

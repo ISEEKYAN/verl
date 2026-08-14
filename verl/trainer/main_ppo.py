@@ -31,7 +31,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 # Define a function to run the PPO-like training process
-def run_ppo(config, task_runner_class) -> None:
+def run_ppo(config, task_runner_class, local_task_runner_class=None) -> None:
     """Initialize Ray cluster and run distributed PPO training process.
 
     Args:
@@ -74,6 +74,12 @@ def run_ppo(config, task_runner_class) -> None:
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
+    if os.environ.get("VERL_LOCAL_TASK_RUNNER") == "1":
+        if local_task_runner_class is None:
+            raise ValueError("VERL_LOCAL_TASK_RUNNER requires a local task runner class")
+        local_task_runner_class().run(config)
+        return
+
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
     if (
@@ -100,8 +106,7 @@ def run_ppo(config, task_runner_class) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
-@ray.remote
-class TaskRunnerV1:
+class TaskRunnerV1Local:
     """V1 TaskRunner for PPO training."""
 
     def __init__(self):
@@ -164,6 +169,9 @@ class TaskRunnerV1:
                 tq.close()
 
 
+TaskRunnerV1 = ray.remote(TaskRunnerV1Local)
+
+
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
     """Main entry point for PPO training with Hydra configuration management.
@@ -182,15 +190,23 @@ def main(config):
     )
 
     if config.trainer.use_v1:
-        run_ppo(config, task_runner_class=TaskRunnerV1)
+        run_ppo(
+            config,
+            task_runner_class=TaskRunnerV1,
+            local_task_runner_class=TaskRunnerV1Local,
+        )
     else:
-        from verl.trainer.main_ppo_v0 import TaskRunner
+        from verl.trainer.main_ppo_v0 import TaskRunner, TaskRunnerLocal
 
         logger.warning(
             "Legacy trainer `main_ppo_v0.py` is deprecated, and wil be removed in v0.9.0."
             "Please set `trainer.use_v1=True` in config to use V1 trainer."
         )
-        run_ppo(config, task_runner_class=TaskRunner)
+        run_ppo(
+            config,
+            task_runner_class=TaskRunner,
+            local_task_runner_class=TaskRunnerLocal,
+        )
 
 
 if __name__ == "__main__":

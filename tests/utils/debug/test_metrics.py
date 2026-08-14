@@ -11,7 +11,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import os
+import tempfile
 import unittest
+from unittest import mock
 
 import torch
 
@@ -42,6 +46,27 @@ class TestMetrics(unittest.TestCase):
         metrics = calculate_debug_metrics(data)
         print(metrics)
         assert metrics["training/rollout_probs_diff_valid"] == 1
+
+    def test_calculate_debug_metrics_can_dump_token_level_diff(self):
+        data = DataProto.from_dict(
+            {
+                "rollout_log_probs": torch.tensor([[-1.0, -2.0]]),
+                "old_log_probs": torch.tensor([[-1.0, -2.5]]),
+                "loss_mask": torch.tensor([[1, 1]]),
+                "responses": torch.tensor([[7, 8]]),
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "diff.jsonl")
+            with mock.patch.dict(os.environ, {"VERL_TRAIN_INFER_DIFF_DUMP": path}):
+                calculate_debug_metrics(data)
+
+            record = json.loads(open(path, encoding="utf-8").read())
+            sample = record["samples"][0]
+            assert sample["token_ids"] == [7, 8]
+            assert sample["bitwise_equal_count"] == 1
+            assert sample["valid_token_count"] == 2
+            assert sample["logprob_abs_diff"] == [0.0, 0.5]
 
 
 if __name__ == "__main__":

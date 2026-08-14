@@ -133,8 +133,7 @@ class BaseTaskRunner:
         pass
 
 
-@ray.remote
-class TaskRunner(BaseTaskRunner):
+class TaskRunnerLocal(BaseTaskRunner):
     """Ray remote class for executing distributed PPO training tasks.
 
     This class encapsulates the main training logic and runs as a Ray remote actor
@@ -232,3 +231,6 @@ class TaskRunner(BaseTaskRunner):
 
         # Start the training process.
         trainer.fit()
+
+
+TaskRunner = ray.remote(TaskRunnerLocal)

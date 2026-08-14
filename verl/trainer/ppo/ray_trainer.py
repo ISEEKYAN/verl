@@ -75,6 +75,19 @@ from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
+def _finalize_train_infer_only(trainer, tracker, metrics, progress_bar) -> bool:
+    if os.environ.get("VERL_STOP_AFTER_TRAIN_INFER_DIFF") != "1":
+        return False
+    metrics["trainer/train_infer_only"] = 1
+    tracker.log(data=metrics, step=trainer.global_steps)
+    progress_bar.update(1)
+    if hasattr(trainer.actor_rollout_wg, "async_calls_finalize_fn_exec"):
+        trainer.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+    trainer._shutdown_dump_executor()
+    progress_bar.close()
+    return True
+
+
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
 
@@ -1588,6 +1601,10 @@ class RayPPOTrainer:
                                 from verl.utils.debug.metrics import calculate_debug_metrics
 
                                 metrics.update(calculate_debug_metrics(batch))
+                                if _finalize_train_infer_only(
+                                    self, logger, metrics, progress_bar
+                                ):
+                                    return
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
                     if self.use_reference_policy:

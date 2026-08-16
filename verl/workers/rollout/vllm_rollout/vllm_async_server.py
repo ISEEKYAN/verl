@@ -203,6 +203,21 @@ class vLLMHttpServer:
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
 
+    def _release_engine_port_reservations(self) -> None:
+        """Release reserved ports immediately before vLLM binds them.
+
+        ``get_free_port(..., with_alive_sock=True)`` deliberately keeps these
+        sockets open so concurrently-created rollout replicas cannot select the
+        same ports.  They must, however, be closed before vLLM creates its
+        TCPStore and data-parallel RPC listener.  Keep this operation idempotent
+        because launch cleanup may call it again after a partial startup.
+        """
+        for attribute in ("_master_sock", "_dp_rpc_sock", "_dp_master_sock"):
+            sock = getattr(self, attribute, None)
+            if sock is not None:
+                sock.close()
+                setattr(self, attribute, None)
+
     @property
     def lora_as_adapter(self) -> bool:
         return (
@@ -444,6 +459,10 @@ class vLLMHttpServer:
         if "disable_log_stats" in fn_args:
             kwargs["disable_log_stats"] = engine_args.disable_log_stats
 
+        # Reservations prevent concurrent replicas from choosing the same
+        # ports, but retaining them while AsyncLLM starts makes vLLM's own
+        # TCPStore fail with EADDRINUSE.
+        self._release_engine_port_reservations()
         engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
 
         # Don't keep the dummy data in memory

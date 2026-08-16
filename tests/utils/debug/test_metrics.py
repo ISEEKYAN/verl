@@ -20,7 +20,7 @@ from unittest import mock
 import torch
 
 from verl.protocol import DataProto
-from verl.utils.debug.metrics import calculate_debug_metrics
+from verl.utils.debug.metrics import calculate_debug_metrics, dump_train_infer_input
 
 
 class TestMetrics(unittest.TestCase):
@@ -102,6 +102,32 @@ class TestMetrics(unittest.TestCase):
 
             assert not os.path.exists(path)
             assert not os.path.exists(os.path.join(directory, "diff.pt"))
+
+    def test_pre_forward_dump_survives_without_actor_log_probs(self):
+        data = DataProto.from_dict(
+            tensors={
+                "rollout_log_probs": torch.tensor([[-1.0, -2.0]]),
+                "responses": torch.tensor([[7, 8]]),
+                "response_mask": torch.tensor([[1, 1]]),
+                "input_ids": torch.tensor([[3, 4, 7, 8]]),
+            },
+            meta_info={"temperature": 1.0},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(
+                os.environ,
+                {"VERL_TRAIN_INFER_PRE_FORWARD_DUMP_DIR": directory, "RANK": "0"},
+            ):
+                dump_train_infer_input(data, step=7)
+
+            payload = torch.load(
+                os.path.join(directory, "step00007.pt"), weights_only=True
+            )
+            assert payload["step"] == 7
+            assert payload["RL.vllm.rollout_log_probs"].tolist() == [[-1.0, -2.0]]
+            assert payload["responses"].tolist() == [[7, 8]]
+            assert payload["input_batch"]["input_ids"].tolist() == [[3, 4, 7, 8]]
+            assert "RL.mlite.old_log_probs" not in payload
 
 
 if __name__ == "__main__":

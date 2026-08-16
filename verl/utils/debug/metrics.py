@@ -24,6 +24,54 @@ from verl.protocol import DataProto
 logger = logging.getLogger(__file__)
 
 
+def dump_train_infer_input(data: DataProto, *, step: int) -> None:
+    """Persist the exact teacher-forcing input before actor inference.
+
+    Unlike the normal train/infer dump, this hook intentionally runs before
+    ``old_log_probs`` exist so a CUDA failure inside actor inference still
+    leaves a standalone-replay capsule.
+    """
+    directory = os.environ.get("VERL_TRAIN_INFER_PRE_FORWARD_DUMP_DIR")
+    if not directory or int(os.environ.get("RANK", "0")) != 0:
+        return
+
+    def cpu_raw(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.detach().cpu().contiguous()
+
+    batch = {
+        key: cpu_raw(value)
+        for key, value in data.batch.items()
+        if isinstance(value, torch.Tensor)
+    }
+    payload = {
+        "schema_version": 1,
+        "step": int(step),
+        "responses": batch.get("responses"),
+        "response_mask": batch.get("response_mask"),
+        "RL.vllm.rollout_log_probs": batch.get("rollout_log_probs"),
+        "sample_indices": list(range(len(data))),
+        "input_batch": {
+            key: batch[key]
+            for key in ("prompts", "input_ids", "attention_mask", "position_ids")
+            if key in batch
+        },
+        "batch_meta_info": dict(data.meta_info),
+        "provenance": {
+            "producer": "verl.utils.debug.metrics.dump_train_infer_input",
+            "hostname": socket.gethostname(),
+            "pid": os.getpid(),
+            "verl_commit": os.environ.get("VERL_COMMIT"),
+            "run_stamp": os.environ.get("RUN_STAMP"),
+        },
+    }
+    output_directory = Path(directory)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    path = output_directory / f"step{int(step):05d}.pt"
+    temporary_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    torch.save(payload, temporary_path)
+    os.replace(temporary_path, path)
+
+
 def calculate_token_list_diff(tensor1: torch.Tensor, tensor2: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     # verify inputs
     if tensor1.numel() == 0 or tensor2.numel() == 0:

@@ -1585,6 +1585,9 @@ class RayPPOTrainer:
                             policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
                         )
                     else:  # Recompute old_log_probs
+                        from verl.utils.debug.metrics import dump_train_infer_input
+
+                        dump_train_infer_input(batch, step=self.global_steps)
                         print(
                             f"RL_STAGE old_log_prob_begin step={self.global_steps} samples={len(batch)}",
                             flush=True,

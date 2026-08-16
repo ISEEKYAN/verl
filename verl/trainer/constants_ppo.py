@@ -148,6 +148,7 @@ def get_ppo_ray_runtime_env(config=None):
         "CUDA_LAUNCH_BLOCKING",
         "MLITE_VALIDATE_FINITE",
         "MLITE_VALIDATE_INDICES",
+        "MLITE_CUDA_SYNC_BOUNDARIES",
         "CUBLAS_WORKSPACE_CONFIG",
         "FLASH_ATTENTION_DETERMINISTIC",
         "NCCL_DETERMINISTIC",

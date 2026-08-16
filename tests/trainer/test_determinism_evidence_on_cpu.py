@@ -12,6 +12,7 @@ def test_runtime_env_forwards_determinism_evidence_inputs(monkeypatch) -> None:
         "VERL_DETERMINISM_SEED": "42",
         "PYTHONHASHSEED": "42",
         "PYTHONPATH": "/workspace/verl:/workspace/mlite",
+        "MLITE_CUDA_SYNC_BOUNDARIES": "1",
     }
     for key, value in expected.items():
         monkeypatch.setenv(key, value)

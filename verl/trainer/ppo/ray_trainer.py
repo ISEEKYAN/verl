@@ -75,6 +75,19 @@ from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
+def _finalize_train_infer_only(trainer, tracker, metrics, progress_bar) -> bool:
+    if os.environ.get("VERL_STOP_AFTER_TRAIN_INFER_DIFF") != "1":
+        return False
+    metrics["trainer/train_infer_only"] = 1
+    tracker.log(data=metrics, step=trainer.global_steps)
+    progress_bar.update(1)
+    if hasattr(trainer.actor_rollout_wg, "async_calls_finalize_fn_exec"):
+        trainer.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+    trainer._shutdown_dump_executor()
+    progress_bar.close()
+    return True
+
+
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
 
@@ -902,6 +915,15 @@ class RayPPOTrainer:
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg[str(actor_role)]
         self.actor_rollout_wg.init_model()
+        if OmegaConf.select(self.config, "actor_rollout_ref.rollout.full_determinism", default=False):
+            from verl.single_controller.base.worker import collect_determinism_evidence
+
+            evidence = {
+                "schema_version": 1,
+                "driver": collect_determinism_evidence(),
+                "ray_workers": self.actor_rollout_wg.get_determinism_evidence(),
+            }
+            print(f"RL_DETERMINISM_EVIDENCE {json.dumps(evidence, sort_keys=True)}", flush=True)
 
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
@@ -1496,6 +1518,12 @@ class RayPPOTrainer:
                     gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
                     if "__do_sample__" in gen_batch_output.non_tensor_batch:
                         gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
+                    print(
+                        "RL_STAGE rollout_done "
+                        f"step={self.global_steps} samples={len(gen_batch_output)} "
+                        f"timing_s={timing_raw.get('gen')}",
+                        flush=True,
+                    )
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         gen_baseline_output = combined_gen_output.slice(num_sampled_prompts, None)
@@ -1557,6 +1585,10 @@ class RayPPOTrainer:
                             policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
                         )
                     else:  # Recompute old_log_probs
+                        print(
+                            f"RL_STAGE old_log_prob_begin step={self.global_steps} samples={len(batch)}",
+                            flush=True,
+                        )
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
                             entropys = old_log_prob.batch["entropys"]
@@ -1588,6 +1620,16 @@ class RayPPOTrainer:
                                 from verl.utils.debug.metrics import calculate_debug_metrics
 
                                 metrics.update(calculate_debug_metrics(batch))
+                                print(
+                                    "RL_STAGE old_log_prob_done "
+                                    f"step={self.global_steps} samples={len(batch)} "
+                                    f"bitwise_fraction={metrics.get('training/rollout_logprob_bitwise_equal_fraction')}",
+                                    flush=True,
+                                )
+                                if _finalize_train_infer_only(
+                                    self, logger, metrics, progress_bar
+                                ):
+                                    return
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
                     if self.use_reference_policy:

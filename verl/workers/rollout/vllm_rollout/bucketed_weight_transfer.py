@@ -304,6 +304,12 @@ class BucketedWeightReceiver:
     def _init_socket(self):
         """Initialize ZMQ REP socket and connect."""
         self.socket = self.zmq_context.socket(zmq.REP)
+        timeout_ms = int(
+            float(os.environ.get("MLITE_WEIGHT_SYNC_TIMEOUT_S", "300")) * 1000
+        )
+        self.socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        self.socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
+        self.socket.setsockopt(zmq.LINGER, 0)
         self.socket.connect(self.zmq_handle)
 
     def _init_buffer(self):

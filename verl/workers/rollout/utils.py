@@ -60,7 +60,8 @@ class _UvicornServerAutoPort(uvicorn.Server):
             self._startup_done.set()
 
     async def get_port(self) -> int | None:
-        await self._startup_done.wait()
+        timeout_s = float(os.environ.get("VERL_UVICORN_STARTUP_TIMEOUT_S", "60"))
+        await asyncio.wait_for(self._startup_done.wait(), timeout=timeout_s)
         return self.actual_port
 
 

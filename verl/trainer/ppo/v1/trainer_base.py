@@ -558,6 +558,9 @@ class PPOTrainer(ABC):
         # 4. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
             batch = self._compute_old_log_prob(batch, metrics=metrics)
+        if os.environ.get("VERL_STOP_AFTER_TRAIN_INFER_DIFF") == "1":
+            metrics["trainer/train_infer_only"] = 1
+            return batch
 
         # 5. [OPTIONAL] compute ref_log_prob
         if self.use_reference_policy:

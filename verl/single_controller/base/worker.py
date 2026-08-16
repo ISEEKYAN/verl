@@ -31,6 +31,44 @@ from verl.utils.device import (
 from .decorator import Dispatch, Execute, register
 
 
+def collect_determinism_evidence() -> dict:
+    """Collect runtime determinism state without requiring CUDA initialization."""
+    import importlib
+    import sys
+
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    evidence = {
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "rank": os.environ.get("RANK"),
+        "local_rank": os.environ.get("LOCAL_RANK"),
+        "VLLM_BATCH_INVARIANT": os.environ.get("VLLM_BATCH_INVARIANT"),
+        "VLLM_DS4_DECODE_KERNEL": os.environ.get("VLLM_DS4_DECODE_KERNEL"),
+        "VERL_FULL_DETERMINISM": os.environ.get("VERL_FULL_DETERMINISM"),
+        "seed": os.environ.get("VERL_DETERMINISM_SEED") or os.environ.get("PYTHONHASHSEED"),
+        "PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED"),
+        "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "CUDA_LAUNCH_BLOCKING": os.environ.get("CUDA_LAUNCH_BLOCKING"),
+        "DEEPGEMM_SITE": os.environ.get("DEEPGEMM_SITE"),
+        "PYTHONPATH_prefix": pythonpath.split(os.pathsep)[:4],
+        "sys_path_prefix": sys.path[:4],
+        "deep_gemm_file": None,
+        "deep_gemm_batch_invariant": None,
+        "deep_gemm_error": None,
+    }
+    try:
+        deep_gemm = importlib.import_module("deep_gemm")
+        evidence["deep_gemm_file"] = getattr(deep_gemm, "__file__", None)
+        getter = getattr(deep_gemm, "get_batch_invariant", None)
+        if getter is None:
+            evidence["deep_gemm_error"] = "get_batch_invariant unavailable"
+        else:
+            evidence["deep_gemm_batch_invariant"] = bool(getter())
+    except Exception as exc:
+        evidence["deep_gemm_error"] = f"{type(exc).__name__}: {exc}"
+    return evidence
+
+
 @dataclass
 class DistRankInfo:
     tp_rank: int
@@ -306,6 +344,11 @@ class Worker(WorkerHelper):
 
         visible_devices = os.environ.get(get_visible_devices_keyword().upper(), "not set")
         return visible_devices
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_determinism_evidence(self):
+        """Return determinism evidence from this worker process."""
+        return collect_determinism_evidence()
 
     @property
     def world_size(self):

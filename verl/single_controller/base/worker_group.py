@@ -16,6 +16,7 @@ the class of WorkerGroup
 """
 
 import logging
+import os
 import signal
 import threading
 import time
@@ -156,9 +157,22 @@ class WorkerGroup:
 
     def _block_until_all_workers_alive(self) -> None:
         """Blocks until all workers in the group are alive."""
+        configured_timeout = getattr(self, "_ray_wait_register_center_timeout", 300)
+        timeout_s = float(
+            os.environ.get("VERL_WORKER_ALIVE_TIMEOUT_S", configured_timeout)
+        )
+        deadline = time.monotonic() + timeout_s
         while True:
             all_state = [self._is_worker_alive(worker) for worker in self._workers]
             if False in all_state:
+                if time.monotonic() >= deadline:
+                    dead_indices = [
+                        index for index, alive in enumerate(all_state) if not alive
+                    ]
+                    raise TimeoutError(
+                        f"Workers {dead_indices} were not alive within "
+                        f"{timeout_s:g} seconds"
+                    )
                 time.sleep(1)
             else:
                 break

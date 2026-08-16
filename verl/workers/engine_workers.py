@@ -85,7 +85,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         from verl.workers.engine import BaseEngine, EngineRegistry
 
-        initialize_global_process_group_ray(timeout_second=None)
+        initialize_global_process_group_ray(
+            timeout_second=int(os.environ.get("VERL_DISTRIBUTED_TIMEOUT_S", "300"))
+        )
 
         set_numa_affinity()
 

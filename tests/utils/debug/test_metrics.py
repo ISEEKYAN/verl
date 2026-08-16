@@ -11,7 +11,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import os
+import tempfile
 import unittest
+from unittest import mock
 
 import torch
 
@@ -42,6 +46,62 @@ class TestMetrics(unittest.TestCase):
         metrics = calculate_debug_metrics(data)
         print(metrics)
         assert metrics["training/rollout_probs_diff_valid"] == 1
+
+    def test_calculate_debug_metrics_can_dump_token_level_diff(self):
+        rollout = torch.tensor([[-1.0, -2.0]], dtype=torch.float16)
+        actor = torch.tensor([[-1.0, -2.5]], dtype=torch.float16)
+        data = DataProto.from_dict(
+            tensors={
+                "rollout_log_probs": rollout,
+                "old_log_probs": actor,
+                "loss_mask": torch.tensor([[1, 1]]),
+                "responses": torch.tensor([[7, 8]]),
+                "prompts": torch.tensor([[3, 4]]),
+            },
+            meta_info={"temperature": 1.0},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "diff.jsonl")
+            with mock.patch.dict(os.environ, {"VERL_TRAIN_INFER_DIFF_DUMP": path}):
+                metrics = calculate_debug_metrics(data)
+
+            record = json.loads(open(path, encoding="utf-8").read())
+            sample = record["samples"][0]
+            assert sample["token_ids"] == [7, 8]
+            assert sample["bitwise_equal_count"] == 1
+            assert sample["valid_token_count"] == 2
+            assert sample["logprob_abs_diff"] == [0.0, 0.5]
+            assert metrics["training/rollout_logprob_abs_diff_max"] == 0.5
+            assert metrics["training/rollout_logprob_bitwise_equal_fraction"] == 0.5
+            raw = torch.load(os.path.join(directory, "diff.pt"), weights_only=True)
+            assert torch.equal(raw["RL.vllm.rollout_log_probs"], rollout)
+            assert torch.equal(raw["RL.mlite.old_log_probs"], actor)
+            assert raw["RL.vllm.rollout_log_probs"].dtype == torch.float16
+            assert raw["responses"].tolist() == [[7, 8]]
+            assert raw["response_mask"].dtype == torch.int64
+            assert raw["input_batch"]["prompts"].tolist() == [[3, 4]]
+            assert raw["batch_meta_info"] == {"temperature": 1.0}
+            assert raw["provenance"]["sources"]["RL.mlite.old_log_probs"] == "old_log_probs"
+
+    def test_train_infer_dump_is_rank_zero_only(self):
+        data = DataProto.from_dict(
+            {
+                "rollout_log_probs": torch.tensor([[-1.0]]),
+                "old_log_probs": torch.tensor([[-1.0]]),
+                "loss_mask": torch.tensor([[1]]),
+                "responses": torch.tensor([[7]]),
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "diff.jsonl")
+            with mock.patch.dict(
+                os.environ,
+                {"VERL_TRAIN_INFER_DIFF_DUMP": path, "RANK": "1"},
+            ):
+                calculate_debug_metrics(data)
+
+            assert not os.path.exists(path)
+            assert not os.path.exists(os.path.join(directory, "diff.pt"))
 
 
 if __name__ == "__main__":

@@ -270,7 +270,13 @@ class vLLMColocateWorkerExtension:
             from verl.utils.vllm.vllm_quant_utils import prepare_quanted_weights_for_loading
 
             quant_reload_states = [
-                (model, prepare_quanted_weights_for_loading(model)) for model in self._iter_all_models()
+                (
+                    model,
+                    prepare_quanted_weights_for_loading(
+                        model, self.model_runner.vllm_config
+                    ),
+                )
+                for model in self._iter_all_models()
             ]
         else:
             # TODO(wuxibin): not need anymore for newer vllm version.
@@ -328,7 +334,9 @@ class vLLMColocateWorkerExtension:
             from verl.utils.vllm.vllm_quant_utils import process_quanted_weights_after_loading
 
             for model, reload_state in quant_reload_states:
-                process_quanted_weights_after_loading(model, reload_state)
+                process_quanted_weights_after_loading(
+                    model, reload_state, self.model_runner.vllm_config
+                )
         else:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading

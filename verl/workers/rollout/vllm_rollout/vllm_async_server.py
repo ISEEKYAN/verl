@@ -1117,21 +1117,25 @@ class vLLMReplica(RolloutReplica):
 
     async def launch_servers(self):
         """Launch http server in each node."""
+        timeout_s = float(os.environ.get("VERL_VLLM_LAUNCH_TIMEOUT_S", "300"))
         assert len(self.workers) == self.world_size, (
             f"worker number {len(self.workers)} not equal to world size {self.world_size}"
         )
 
         # get (node_id, CUDA_VISIBLE_DEVICES) of all workers
-        worker_infos = await asyncio.gather(
-            *[
-                worker.__ray_call__.remote(
-                    lambda self: (
-                        ray.get_runtime_context().get_node_id(),
-                        ray.get_runtime_context().get_accelerator_ids()[get_resource_name()][0],
+        worker_infos = await asyncio.wait_for(
+            asyncio.gather(
+                *[
+                    worker.__ray_call__.remote(
+                        lambda self: (
+                            ray.get_runtime_context().get_node_id(),
+                            ray.get_runtime_context().get_accelerator_ids()[get_resource_name()][0],
+                        )
                     )
-                )
-                for worker in self.workers
-            ]
+                    for worker in self.workers
+                ]
+            ),
+            timeout=timeout_s,
         )
         worker_cuda_visible_devices = [worker_info[1] for worker_info in worker_infos]
         worker_node_ids = [worker_info[0] for worker_info in worker_infos]
@@ -1178,18 +1182,29 @@ class vLLMReplica(RolloutReplica):
             self.servers.append(server)
 
         # launch http server in each node
-        master_address, master_port, dp_rpc_port = await self.servers[0].get_master_address.remote()
-        await asyncio.gather(
-            *[
-                server.launch_server.remote(
-                    master_address=master_address, master_port=master_port, dp_rpc_port=dp_rpc_port
-                )
-                for server in self.servers
-            ]
+        master_address, master_port, dp_rpc_port = await asyncio.wait_for(
+            self.servers[0].get_master_address.remote(),
+            timeout=timeout_s,
+        )
+        await asyncio.wait_for(
+            asyncio.gather(
+                *[
+                    server.launch_server.remote(
+                        master_address=master_address,
+                        master_port=master_port,
+                        dp_rpc_port=dp_rpc_port,
+                    )
+                    for server in self.servers
+                ]
+            ),
+            timeout=timeout_s,
         )
 
         # get http server address from first server
-        server_address, server_port = await self.servers[0].get_server_address.remote()
+        server_address, server_port = await asyncio.wait_for(
+            self.servers[0].get_server_address.remote(),
+            timeout=timeout_s,
+        )
         self._server_handle = self.servers[0]
         self._server_address = (
             f"[{server_address}]:{server_port}"

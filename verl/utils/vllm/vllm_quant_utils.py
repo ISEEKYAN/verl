@@ -335,7 +335,10 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         del v, param_lp, param_scale
 
 
-def prepare_quanted_weights_for_loading(model):
+_NATIVE_DSV4_RELOAD_KEY = "native_dsv4_layerwise"
+
+
+def prepare_quanted_weights_for_loading(model, vllm_config=None):
     """Restore quantized params to the layout their ``weight_loader`` expects.
 
     Must run once before the first bucket, and pairs with
@@ -345,6 +348,27 @@ def prepare_quanted_weights_for_loading(model):
     so this is safe to call for any quantization scheme. The returned value is
     opaque reload state for the paired call.
     """
+    if is_deepseek_v4_model(model) and vllm_config is not None:
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
+        from vllm.model_executor.model_loader.reload.meta import SKIP_TENSORS
+
+        # These tensors are already in their runtime layout and either arrive
+        # through VERL's buffer path or must retain the dummy-load invariant.
+        # Moving them to meta makes routing/sink state disappear between IPC
+        # buckets, so keep the same exclusions as vLLM's native transfer path.
+        SKIP_TENSORS.update(
+            {"tid2eid", "expert_bias", "e_score_correction_bias", "attn_sink"}
+        )
+        with set_current_vllm_config(vllm_config):
+            initialize_layerwise_reload(model)
+        model._verl_dsv4_native_layerwise_reload_active = True
+        logger.warning("VERL_DSV4_NATIVE_LAYERWISE_RELOAD initialized")
+        return {
+            _NATIVE_DSV4_RELOAD_KEY: True,
+            "vllm_config": vllm_config,
+        }
+
     restore_mxfp8_weights_for_loading(model)
     reload_state: dict[str, Any] = {
         "fp8_layers": stage_fp8_params_for_loading(model),
@@ -353,11 +377,27 @@ def prepare_quanted_weights_for_loading(model):
     return reload_state
 
 
-def process_quanted_weights_after_loading(model, reload_state):
+def process_quanted_weights_after_loading(model, reload_state, vllm_config=None):
     """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
+    reload_state = reload_state or {}
+    if reload_state.get(_NATIVE_DSV4_RELOAD_KEY):
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader.reload import (
+            finalize_layerwise_processing,
+        )
+
+        config = vllm_config or reload_state["vllm_config"]
+        try:
+            with set_current_vllm_config(config):
+                finalize_layerwise_processing(model, config.model_config)
+        finally:
+            model._verl_dsv4_native_layerwise_reload_active = False
+        clear_rocm_attention_weight_caches(model)
+        logger.warning("VERL_DSV4_NATIVE_LAYERWISE_RELOAD finalized")
+        return
+
     clear_rocm_attention_weight_caches(model)
     apply_mxfp8_transformation_after_loading(model)
-    reload_state = reload_state or {}
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
 
@@ -376,6 +416,11 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
     vllm_dtype = model_runner.vllm_config.model_config.dtype
 
     weights = list(weights)
+    if getattr(model, "_verl_dsv4_native_layerwise_reload_active", False):
+        # Native online loaders may retain bucket arguments until their whole
+        # logical layer is complete.  The IPC receiver reuses its communication
+        # buffer after each callback, so detach every tensor from that storage.
+        weights = [(name, tensor.clone()) for name, tensor in weights]
     weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
 
     # Monkey patch the param class to their subclass, as certain models

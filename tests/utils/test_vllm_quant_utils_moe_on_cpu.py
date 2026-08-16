@@ -27,7 +27,9 @@ with lightweight fakes (no real vLLM required).
 import importlib.util
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -238,3 +240,55 @@ def test_old_vllm_fusedmoe_class_still_supported():
     mod.fp8_state.seen_params.clear()
     mod.fp8_state.fp8_param_names.clear()
     assert mod.is_fp8_weight("model.layers.0.mlp.experts.0.gate_proj.weight", model) is True
+
+
+def test_ds4_refit_uses_native_layerwise_lifecycle(monkeypatch):
+    mod, _ = _load_quant_utils(fused_moe_is_function=True)
+    events = []
+    config_module = _make_module("vllm.config")
+    reload_module = _make_module("vllm.model_executor.model_loader.reload")
+    reload_meta = _make_module("vllm.model_executor.model_loader.reload.meta")
+    reload_meta.SKIP_TENSORS = {"existing"}
+
+    @contextmanager
+    def set_current_vllm_config(config):
+        events.append(("enter", config))
+        yield
+        events.append(("exit", config))
+
+    config_module.set_current_vllm_config = set_current_vllm_config
+    reload_module.initialize_layerwise_reload = (
+        lambda model: events.append(("initialize", model))
+    )
+    reload_module.finalize_layerwise_processing = (
+        lambda model, model_config: events.append(
+            ("finalize", model, model_config)
+        )
+    )
+    monkeypatch.setitem(sys.modules, config_module.__name__, config_module)
+    monkeypatch.setitem(sys.modules, reload_module.__name__, reload_module)
+    monkeypatch.setitem(sys.modules, reload_meta.__name__, reload_meta)
+
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(model_type="deepseek_v4")
+    vllm_config = SimpleNamespace(model_config=object())
+    state = mod.prepare_quanted_weights_for_loading(model, vllm_config)
+    assert state[mod._NATIVE_DSV4_RELOAD_KEY] is True
+    assert model._verl_dsv4_native_layerwise_reload_active is True
+    mod.process_quanted_weights_after_loading(model, state, vllm_config)
+    assert model._verl_dsv4_native_layerwise_reload_active is False
+    assert events == [
+        ("enter", vllm_config),
+        ("initialize", model),
+        ("exit", vllm_config),
+        ("enter", vllm_config),
+        ("finalize", model, vllm_config.model_config),
+        ("exit", vllm_config),
+    ]
+    assert reload_meta.SKIP_TENSORS == {
+        "existing",
+        "tid2eid",
+        "expert_bias",
+        "e_score_correction_bias",
+        "attn_sink",
+    }

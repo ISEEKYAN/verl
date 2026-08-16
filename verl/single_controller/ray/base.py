@@ -53,7 +53,17 @@ def func_generator(self, method_name, dispatch_fn, collect_fn, execute_fn, block
             padding_count = kwargs.pop(_padding_size_key, 0)
             output = execute_fn(method_name, *args, **kwargs)
             if blocking:
-                output = ray.get(output)
+                timeout_s = float(os.environ.get("VERL_RAY_BLOCKING_TIMEOUT_S", "0"))
+                try:
+                    output = ray.get(
+                        output,
+                        timeout=timeout_s if timeout_s > 0 else None,
+                    )
+                except ray.exceptions.GetTimeoutError as exc:
+                    raise TimeoutError(
+                        f"Ray worker call {method_name!r} exceeded "
+                        f"{timeout_s:g} seconds"
+                    ) from exc
             output = collect_fn(self, output)
             if padding_count > 0:
                 if isinstance(output, DataProto):
@@ -157,7 +167,18 @@ class RayResourcePool(ResourcePool):
             for idx, bundles in enumerate(pg_scheme)
         ]
 
-        ray.get([pg.ready() for pg in pgs])
+        timeout_s = float(os.environ.get("VERL_PLACEMENT_GROUP_TIMEOUT_S", "300"))
+        try:
+            ray.get([pg.ready() for pg in pgs], timeout=timeout_s)
+        except ray.exceptions.GetTimeoutError as exc:
+            states = [
+                ray._private.state.state.placement_group_table(pg.id)
+                for pg in pgs
+            ]
+            raise TimeoutError(
+                f"Ray placement groups were not ready within {timeout_s:g} "
+                f"seconds: {states}"
+            ) from exc
 
         self.pgs = sort_placement_group_by_node_ip(pgs)
         return pgs

@@ -11,7 +11,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
+import os
+import socket
+from pathlib import Path
 
 import torch
 
@@ -60,6 +64,115 @@ def calculate_log_prob_diff(log_probs1: torch.Tensor, log_probs2: torch.Tensor, 
     return torch.masked_select(full_diff, mask)
 
 
+def _dump_train_infer_diff(
+    *,
+    rollout_log_probs: torch.Tensor,
+    actor_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    responses: torch.Tensor,
+    data: DataProto,
+) -> None:
+    path = os.environ.get("VERL_TRAIN_INFER_DIFF_DUMP")
+    if not path:
+        return
+    # This comparison runs on the trainer driver. Keep the guard explicit so
+    # future worker-side callers cannot race while writing the same artifacts.
+    rank = int(os.environ.get("RANK", "0"))
+    if rank != 0:
+        return
+    rollout = rollout_log_probs.detach().float().cpu()
+    actor = actor_log_probs.detach().float().cpu()
+    mask = response_mask.detach().bool().cpu()
+    tokens = responses.detach().cpu()
+    samples = []
+    attention_mask = data.batch.get("attention_mask")
+    prompt_width = (
+        attention_mask.shape[1] - responses.shape[1]
+        if attention_mask is not None
+        else None
+    )
+    for index in range(rollout.shape[0]):
+        valid = mask[index]
+        rollout_values = rollout[index][valid]
+        actor_values = actor[index][valid]
+        logprob_diff = (rollout_values - actor_values).abs()
+        probability_diff = (rollout_values.exp() - actor_values.exp()).abs()
+        samples.append(
+            {
+                "sample_index": index,
+                "token_ids": tokens[index][valid].tolist(),
+                "rollout_log_probs": rollout_values.tolist(),
+                "actor_log_probs": actor_values.tolist(),
+                "logprob_abs_diff": logprob_diff.tolist(),
+                "probability_abs_diff": probability_diff.tolist(),
+                "bitwise_equal_count": int(torch.eq(rollout_values, actor_values).sum()),
+                "valid_token_count": int(valid.sum()),
+                "prompt_token_count": (
+                    int(attention_mask[index, :prompt_width].sum().item())
+                    if prompt_width is not None
+                    else None
+                ),
+            }
+        )
+    record = {
+        "schema_version": 1,
+        "shape": list(rollout.shape),
+        "samples": samples,
+    }
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+    raw_path = os.environ.get("VERL_TRAIN_INFER_RAW_DUMP")
+    if not raw_path:
+        jsonl_path = Path(path)
+        raw_path = str(jsonl_path.with_suffix(".pt"))
+
+    def cpu_raw(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.detach().cpu().contiguous()
+
+    input_batch = {}
+    for key in ("prompts", "input_ids", "attention_mask", "position_ids"):
+        if key in data.batch:
+            input_batch[key] = cpu_raw(data.batch[key])
+    provenance = {
+        "producer": "verl.utils.debug.metrics.calculate_debug_metrics",
+        "sources": {
+            "RL.vllm.rollout_log_probs": "rollout_log_probs",
+            "RL.mlite.old_log_probs": "old_log_probs",
+        },
+        "hostname": socket.gethostname(),
+        "pid": os.getpid(),
+        "rank": rank,
+        "world_size": int(os.environ.get("WORLD_SIZE", "1")),
+        "verl_commit": os.environ.get("VERL_COMMIT"),
+        "run_stamp": os.environ.get("RUN_STAMP"),
+        "vllm_batch_invariant": os.environ.get("VLLM_BATCH_INVARIANT"),
+        "vllm_ds4_decode_kernel": os.environ.get("VLLM_DS4_DECODE_KERNEL"),
+        "verl_full_determinism": os.environ.get("VERL_FULL_DETERMINISM"),
+        "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
+    }
+    payload = {
+        "schema_version": 1,
+        "RL.vllm.rollout_log_probs": cpu_raw(rollout_log_probs),
+        "RL.mlite.old_log_probs": cpu_raw(actor_log_probs),
+        "responses": cpu_raw(responses),
+        "response_mask": cpu_raw(response_mask),
+        "sample_indices": list(range(responses.shape[0])),
+        "input_batch": input_batch,
+        "batch_meta_info": dict(data.meta_info),
+        "provenance": provenance,
+    }
+    raw_directory = os.path.dirname(raw_path)
+    if raw_directory:
+        os.makedirs(raw_directory, exist_ok=True)
+    temporary_path = f"{raw_path}.tmp.{os.getpid()}"
+    torch.save(payload, temporary_path)
+    os.replace(temporary_path, raw_path)
+
+
 def calculate_debug_metrics(data: DataProto) -> dict:
     """
     calculate rollout vs actor logprobs diff, for debugging purpose
@@ -85,6 +198,9 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     if "response_mask" in data.batch:
         logger.debug("response mask found, use it to mask log probs")
         log_prob_mask = data.batch["response_mask"]
+    elif "loss_mask" in data.batch:
+        logger.debug("loss mask found, use it to mask log probs")
+        log_prob_mask = data.batch["loss_mask"]
     elif "attention_mask" in data.batch:
         log_prob_mask = data.batch["attention_mask"]
     else:
@@ -98,6 +214,13 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     actor_probs = torch.exp(actor_old_log_probs)
     rollout_probs = torch.exp(rollout_old_log_probs)
     response_mask_bool = response_mask.bool()
+    _dump_train_infer_diff(
+        rollout_log_probs=rollout_old_log_probs,
+        actor_log_probs=actor_old_log_probs,
+        response_mask=response_mask,
+        responses=responses,
+        data=data,
+    )
 
     # check if there are any valid tokens before computing metrics
     if not response_mask_bool.any():
@@ -108,14 +231,28 @@ def calculate_debug_metrics(data: DataProto) -> dict:
             "training/rollout_probs_diff_mean": float("nan"),
             "training/rollout_probs_diff_std": float("nan"),
             "training/rollout_actor_probs_pearson_corr": float("nan"),
+            "training/rollout_logprob_abs_diff_max": float("nan"),
+            "training/rollout_logprob_bitwise_equal_fraction": float("nan"),
         }
 
     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
     rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
+    rollout_log_probs_valid = torch.masked_select(rollout_old_log_probs, response_mask_bool)
+    actor_log_probs_valid = torch.masked_select(actor_old_log_probs, response_mask_bool)
+    logprob_abs_diff = torch.abs(rollout_log_probs_valid - actor_log_probs_valid)
     return {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).detach().item(),
         "training/rollout_actor_probs_pearson_corr": pearson_corrcoef,
+        "training/rollout_logprob_abs_diff_max": torch.max(logprob_abs_diff).detach().item(),
+        "training/rollout_logprob_bitwise_equal_fraction": torch.eq(
+            rollout_log_probs_valid,
+            actor_log_probs_valid,
+        )
+        .float()
+        .mean()
+        .detach()
+        .item(),
     }

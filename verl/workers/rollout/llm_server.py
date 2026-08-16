@@ -321,11 +321,18 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         # the LB may be temporarily empty during weight sync / scaling transitions.
         # In that case keep retrying every 1 s until a server becomes available.
         # Otherwise raise immediately so callers see the error right away.
+        timeout_s = float(os.environ.get("VERL_SERVER_ACQUIRE_TIMEOUT_S", "300"))
+        deadline = asyncio.get_running_loop().time() + timeout_s
         while True:
             try:
                 return await super()._acquire_server(request_id)
             except RuntimeError as e:
                 if "No available servers in load balancer" in str(e) and self._only_hybrid:
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise TimeoutError(
+                            f"No rollout server became available within "
+                            f"{timeout_s:g} seconds"
+                        ) from e
                     await asyncio.sleep(1)
                 else:
                     raise

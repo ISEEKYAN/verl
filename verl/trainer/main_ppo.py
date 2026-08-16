@@ -13,6 +13,11 @@
 # limitations under the License.
 import logging
 import os
+import signal
+import sys
+import threading
+import faulthandler
+from contextlib import contextmanager
 from pprint import pprint
 
 import hydra
@@ -30,8 +35,44 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
+@contextmanager
+def _startup_deadline(label: str, env_name: str):
+    timeout_s = float(os.environ.get(env_name, "0"))
+    if timeout_s <= 0:
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    watchdog_cancelled = threading.Event()
+
+    def _raise_timeout(_signum, _frame):
+        raise TimeoutError(f"{label} exceeded {timeout_s:g} seconds")
+
+    def _hard_timeout():
+        if watchdog_cancelled.wait(timeout_s + 1):
+            return
+        print(
+            f"VERL_STARTUP_TIMEOUT {label} exceeded {timeout_s:g} seconds; terminating",
+            file=sys.stderr,
+            flush=True,
+        )
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        os._exit(124)
+
+    watchdog = threading.Thread(target=_hard_timeout, name=f"{label}-watchdog", daemon=True)
+    watchdog.start()
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        yield
+    finally:
+        watchdog_cancelled.set()
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
 # Define a function to run the PPO-like training process
-def run_ppo(config, task_runner_class) -> None:
+def run_ppo(config, task_runner_class, local_task_runner_class=None) -> None:
     """Initialize Ray cluster and run distributed PPO training process.
 
     Args:
@@ -48,6 +89,7 @@ def run_ppo(config, task_runner_class) -> None:
         os.environ["VERL_FULL_DETERMINISM"] = "1"
         os.environ["VLLM_BATCH_INVARIANT"] = "1"
         os.environ["PYTHONHASHSEED"] = str(rollout_cfg.seed)
+        os.environ["VERL_DETERMINISM_SEED"] = str(rollout_cfg.seed)
 
     trainer_logger = config.trainer.get("logger", [])
     if "rl_insight" in ([trainer_logger] if isinstance(trainer_logger, str) else trainer_logger or []):
@@ -71,8 +113,19 @@ def run_ppo(config, task_runner_class) -> None:
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-        print(f"ray init kwargs: {ray_init_kwargs}")
-        ray.init(**OmegaConf.to_container(ray_init_kwargs))
+        print(f"VERL_STARTUP_STAGE ray_init_begin kwargs={ray_init_kwargs}", flush=True)
+        with _startup_deadline("ray.init()", "VERL_RAY_INIT_TIMEOUT_S"):
+            ray.init(**OmegaConf.to_container(ray_init_kwargs))
+        print("VERL_STARTUP_STAGE ray_init_done", flush=True)
+
+    if os.environ.get("VERL_LOCAL_TASK_RUNNER") == "1":
+        if local_task_runner_class is None:
+            raise ValueError("VERL_LOCAL_TASK_RUNNER requires a local task runner class")
+        print("VERL_STARTUP_STAGE local_task_runner_construct_begin", flush=True)
+        runner = local_task_runner_class()
+        print("VERL_STARTUP_STAGE local_task_runner_construct_done", flush=True)
+        runner.run(config)
+        return
 
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
@@ -100,8 +153,7 @@ def run_ppo(config, task_runner_class) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
-@ray.remote
-class TaskRunnerV1:
+class TaskRunnerV1Local:
     """V1 TaskRunner for PPO training."""
 
     def __init__(self):
@@ -164,6 +216,9 @@ class TaskRunnerV1:
                 tq.close()
 
 
+TaskRunnerV1 = ray.remote(TaskRunnerV1Local)
+
+
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
     """Main entry point for PPO training with Hydra configuration management.
@@ -182,15 +237,23 @@ def main(config):
     )
 
     if config.trainer.use_v1:
-        run_ppo(config, task_runner_class=TaskRunnerV1)
+        run_ppo(
+            config,
+            task_runner_class=TaskRunnerV1,
+            local_task_runner_class=TaskRunnerV1Local,
+        )
     else:
-        from verl.trainer.main_ppo_v0 import TaskRunner
+        from verl.trainer.main_ppo_v0 import TaskRunner, TaskRunnerLocal
 
         logger.warning(
             "Legacy trainer `main_ppo_v0.py` is deprecated, and wil be removed in v0.9.0."
             "Please set `trainer.use_v1=True` in config to use V1 trainer."
         )
-        run_ppo(config, task_runner_class=TaskRunner)
+        run_ppo(
+            config,
+            task_runner_class=TaskRunner,
+            local_task_runner_class=TaskRunnerLocal,
+        )
 
 
 if __name__ == "__main__":

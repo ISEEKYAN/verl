@@ -113,18 +113,48 @@ def get_ppo_ray_runtime_env(config=None):
     if _uses_mindspeed(config):
         runtime_env["env_vars"]["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     for key in list(runtime_env["env_vars"].keys()):
-        if os.environ.get(key) is not None:
-            runtime_env["env_vars"].pop(key, None)
+        value = os.environ.get(key)
+        if value is not None:
+            # Explicitly forward driver overrides. A local Ray head inherits the
+            # environment, but a prestarted/shared head does not.
+            runtime_env["env_vars"][key] = value
     # Always forward these at call-time, not import-time.
-    for key in ("VERL_FULL_DETERMINISM", "VLLM_BATCH_INVARIANT", "VERL_RL_INSIGHT_ENABLE"):
+    for key in (
+        "VERL_FULL_DETERMINISM",
+        "VLLM_BATCH_INVARIANT",
+        "VLLM_DS4_DECODE_KERNEL",
+        "VERL_RL_INSIGHT_ENABLE",
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+        "VERL_MLITE_SKIP_RUNTIME_PATCHES",
+        "VERL_ENGINE_LAZY_IMPORTS",
+        "VERL_VLLM_LAUNCH_TIMEOUT_S",
+        "MLITE_DISTRIBUTED_TIMEOUT_S",
+        "MLITE_WEIGHT_SYNC_TIMEOUT_S",
+        "MLITE_WEIGHT_SYNC_FINGERPRINT",
+        "MLITE_WEIGHT_SYNC_PROBE",
+        "MLITE_WEIGHT_SYNC_PROBE_BACKEND",
+        "VERL_DISTRIBUTED_TIMEOUT_S",
+        "VERL_UVICORN_STARTUP_TIMEOUT_S",
+        "VERL_SERVER_ACQUIRE_TIMEOUT_S",
+        "VLLM_CACHE_ROOT",
+    ):
         runtime_env["env_vars"][key] = os.environ.get(key, "0")
     # Forward only when set: empty string breaks vLLM ParallelConfig int parsing.
     for key in (
         "PYTHONHASHSEED",
+        "VERL_DETERMINISM_SEED",
+        "PYTHONPATH",
+        "DEEPGEMM_SITE",
+        "CUDA_LAUNCH_BLOCKING",
+        "MLITE_VALIDATE_FINITE",
+        "MLITE_VALIDATE_INDICES",
         "CUBLAS_WORKSPACE_CONFIG",
         "FLASH_ATTENTION_DETERMINISTIC",
         "NCCL_DETERMINISTIC",
         "NCCL_ALGO",
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING",
+        "TORCH_NCCL_ENABLE_MONITORING",
+        "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC",
     ):
         val = os.environ.get(key)
         if val is not None:

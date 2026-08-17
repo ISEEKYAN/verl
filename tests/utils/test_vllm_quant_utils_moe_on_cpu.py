@@ -312,18 +312,22 @@ def test_ds4_refit_uses_native_layerwise_lifecycle(monkeypatch):
 def test_ds4_refit_fails_closed_when_routed_experts_receive_no_weights(monkeypatch):
     mod, _ = _load_quant_utils(fused_moe_is_function=True)
     reload_module = _make_module("vllm.model_executor.model_loader.reload")
+    layerwise_module = _make_module(
+        "vllm.model_executor.model_loader.reload.layerwise"
+    )
 
     class RoutedExperts(torch.nn.Module):
         pass
 
     model = torch.nn.Module()
     model.add_module("missing_experts", RoutedExperts())
-    reload_module.get_layerwise_info = lambda layer: SimpleNamespace(
+    layerwise_module.get_layerwise_info = lambda layer: SimpleNamespace(
         can_load=lambda: True,
         load_numel=0,
         load_numel_total=128,
     )
     monkeypatch.setitem(sys.modules, reload_module.__name__, reload_module)
+    monkeypatch.setitem(sys.modules, layerwise_module.__name__, layerwise_module)
 
     import pytest
 

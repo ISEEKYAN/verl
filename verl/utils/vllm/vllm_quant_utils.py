@@ -423,7 +423,7 @@ def _assert_dsv4_routed_experts_reloaded(model) -> None:
     the unsafe fallback case that vLLM would otherwise only warn about before
     restoring stale kernel tensors.
     """
-    from vllm.model_executor.model_loader.reload import get_layerwise_info
+    from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 
     missing = []
     for name, layer in model.named_modules():

@@ -351,27 +351,15 @@ def prepare_quanted_weights_for_loading(model, vllm_config=None):
     if is_deepseek_v4_model(model) and vllm_config is not None:
         from vllm.config import set_current_vllm_config
         from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
-        from vllm.model_executor.model_loader.reload.meta import (
-            SKIP_LOAD_TENSORS,
-            SKIP_TENSORS,
-        )
+        from vllm.model_executor.model_loader.reload.meta import SKIP_TENSORS
 
         # These tensors are already in their runtime layout and either arrive
         # through VERL's buffer path or must retain the dummy-load invariant.
         # Moving them to meta makes routing/sink state disappear between IPC
         # buckets, so keep the same exclusions as vLLM's native transfer path.
-        derived_or_buffer_synced = {
-            "tid2eid",
-            "expert_bias",
-            "e_score_correction_bias",
-            "attn_sink",
-            "cos_sin_cache",
-        }
-        SKIP_TENSORS.update(derived_or_buffer_synced)
-        # These tensors are deliberately not consumed by wrapped checkpoint
-        # weight loaders.  Exclude them from the layer completion denominator
-        # as well, otherwise a successful reload is reported as a failure.
-        SKIP_LOAD_TENSORS.update(derived_or_buffer_synced)
+        SKIP_TENSORS.update(
+            {"tid2eid", "expert_bias", "e_score_correction_bias", "attn_sink"}
+        )
         with set_current_vllm_config(vllm_config):
             initialize_layerwise_reload(model)
         model._verl_dsv4_native_layerwise_reload_active = True
@@ -401,7 +389,6 @@ def process_quanted_weights_after_loading(model, reload_state, vllm_config=None)
         config = vllm_config or reload_state["vllm_config"]
         try:
             with set_current_vllm_config(config):
-                _assert_dsv4_routed_experts_reloaded(model)
                 finalize_layerwise_processing(model, config.model_config)
         finally:
             model._verl_dsv4_native_layerwise_reload_active = False
@@ -413,34 +400,6 @@ def process_quanted_weights_after_loading(model, reload_state, vllm_config=None)
     apply_mxfp8_transformation_after_loading(model)
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
-
-
-def _assert_dsv4_routed_experts_reloaded(model) -> None:
-    """Fail closed when an EP rank received none of a routed-expert layer.
-
-    Successfully completed layers reset their reload state eagerly.  A layer
-    that is still loadable with zero loaded elements is therefore precisely
-    the unsafe fallback case that vLLM would otherwise only warn about before
-    restoring stale kernel tensors.
-    """
-    from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
-
-    missing = []
-    for name, layer in model.named_modules():
-        if layer.__class__.__name__ != "RoutedExperts":
-            continue
-        info = get_layerwise_info(layer)
-        if (
-            info.can_load()
-            and int(info.load_numel) <= 0
-            and int(info.load_numel_total or 0) > 0
-        ):
-            missing.append(name or "<root>")
-    if missing:
-        raise RuntimeError(
-            "DS4 vLLM refit received no local expert weights for RoutedExperts "
-            "modules: " + ", ".join(missing)
-        )
 
 
 def load_quanted_weights(weights, model_runner, is_drafter=False):

@@ -249,7 +249,6 @@ def test_ds4_refit_uses_native_layerwise_lifecycle(monkeypatch):
     reload_module = _make_module("vllm.model_executor.model_loader.reload")
     reload_meta = _make_module("vllm.model_executor.model_loader.reload.meta")
     reload_meta.SKIP_TENSORS = {"existing"}
-    reload_meta.SKIP_LOAD_TENSORS = {"existing_load"}
 
     @contextmanager
     def set_current_vllm_config(config):
@@ -265,11 +264,6 @@ def test_ds4_refit_uses_native_layerwise_lifecycle(monkeypatch):
         lambda model, model_config: events.append(
             ("finalize", model, model_config)
         )
-    )
-    reload_module.get_layerwise_info = lambda layer: SimpleNamespace(
-        can_load=lambda: False,
-        load_numel=0,
-        load_numel_total=None,
     )
     monkeypatch.setitem(sys.modules, config_module.__name__, config_module)
     monkeypatch.setitem(sys.modules, reload_module.__name__, reload_module)
@@ -297,39 +291,4 @@ def test_ds4_refit_uses_native_layerwise_lifecycle(monkeypatch):
         "expert_bias",
         "e_score_correction_bias",
         "attn_sink",
-        "cos_sin_cache",
     }
-    assert reload_meta.SKIP_LOAD_TENSORS == {
-        "existing_load",
-        "tid2eid",
-        "expert_bias",
-        "e_score_correction_bias",
-        "attn_sink",
-        "cos_sin_cache",
-    }
-
-
-def test_ds4_refit_fails_closed_when_routed_experts_receive_no_weights(monkeypatch):
-    mod, _ = _load_quant_utils(fused_moe_is_function=True)
-    reload_module = _make_module("vllm.model_executor.model_loader.reload")
-    layerwise_module = _make_module(
-        "vllm.model_executor.model_loader.reload.layerwise"
-    )
-
-    class RoutedExperts(torch.nn.Module):
-        pass
-
-    model = torch.nn.Module()
-    model.add_module("missing_experts", RoutedExperts())
-    layerwise_module.get_layerwise_info = lambda layer: SimpleNamespace(
-        can_load=lambda: True,
-        load_numel=0,
-        load_numel_total=128,
-    )
-    monkeypatch.setitem(sys.modules, reload_module.__name__, reload_module)
-    monkeypatch.setitem(sys.modules, layerwise_module.__name__, layerwise_module)
-
-    import pytest
-
-    with pytest.raises(RuntimeError, match="missing_experts"):
-        mod._assert_dsv4_routed_experts_reloaded(model)

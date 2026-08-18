@@ -8,7 +8,9 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 def test_runtime_env_forwards_determinism_evidence_inputs(monkeypatch) -> None:
     expected = {
         "VLLM_BATCH_INVARIANT": "1",
-        "VLLM_DS4_ALIGNMENT_KERNEL_LIB": "/workspace/libds4_alignment.so",
+        "VLLM_BATCH_INVARIANT_KERNEL_LIB": (
+            "/workspace/_vllm_batch_invariant_C.so"
+        ),
         "VERL_FULL_DETERMINISM": "1",
         "VERL_DETERMINISM_SEED": "42",
         "PYTHONHASHSEED": "42",

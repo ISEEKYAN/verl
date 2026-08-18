@@ -128,10 +128,21 @@ def _dump_train_infer_diff(
     rank = int(os.environ.get("RANK", "0"))
     if rank != 0:
         return
+    mode = os.environ.get("VERL_TRAIN_INFER_DIFF_MODE", "full").strip().lower()
+    if mode not in {"full", "compact"}:
+        raise ValueError(
+            "VERL_TRAIN_INFER_DIFF_MODE must be 'full' or 'compact', "
+            f"got {mode!r}"
+        )
     rollout = rollout_log_probs.detach().float().cpu()
     actor = actor_log_probs.detach().float().cpu()
     mask = response_mask.detach().bool().cpu()
     tokens = responses.detach().cpu()
+    token_sample_limit = int(
+        os.environ.get("VERL_TRAIN_INFER_TOKEN_SAMPLE_LIMIT", "8")
+    )
+    if token_sample_limit < 0:
+        raise ValueError("VERL_TRAIN_INFER_TOKEN_SAMPLE_LIMIT must be non-negative")
     samples = []
     attention_mask = data.batch.get("attention_mask")
     prompt_width = (
@@ -145,26 +156,54 @@ def _dump_train_infer_diff(
         actor_values = actor[index][valid]
         logprob_diff = (rollout_values - actor_values).abs()
         probability_diff = (rollout_values.exp() - actor_values.exp()).abs()
-        samples.append(
-            {
-                "sample_index": index,
-                "token_ids": tokens[index][valid].tolist(),
-                "rollout_log_probs": rollout_values.tolist(),
-                "actor_log_probs": actor_values.tolist(),
-                "logprob_abs_diff": logprob_diff.tolist(),
-                "probability_abs_diff": probability_diff.tolist(),
-                "bitwise_equal_count": int(torch.eq(rollout_values, actor_values).sum()),
-                "valid_token_count": int(valid.sum()),
-                "prompt_token_count": (
-                    int(attention_mask[index, :prompt_width].sum().item())
-                    if prompt_width is not None
-                    else None
-                ),
-            }
-        )
+        sample = {
+            "sample_index": index,
+            "token_ids": (
+                tokens[index][valid].tolist()
+                if mode == "full" or index < token_sample_limit
+                else []
+            ),
+            "bitwise_equal_count": int(torch.eq(rollout_values, actor_values).sum()),
+            "valid_token_count": int(valid.sum()),
+            "prompt_token_count": (
+                int(attention_mask[index, :prompt_width].sum().item())
+                if prompt_width is not None
+                else None
+            ),
+        }
+        if mode == "full":
+            sample.update(
+                {
+                    "rollout_log_probs": rollout_values.tolist(),
+                    "actor_log_probs": actor_values.tolist(),
+                    "logprob_abs_diff": logprob_diff.tolist(),
+                    "probability_abs_diff": probability_diff.tolist(),
+                }
+            )
+        else:
+            sample.update(
+                {
+                    "logprob_abs_diff_max": float(logprob_diff.max().item())
+                    if logprob_diff.numel()
+                    else 0.0,
+                    "logprob_abs_diff_sum": float(logprob_diff.sum().item()),
+                    "probability_abs_diff_max": float(probability_diff.max().item())
+                    if probability_diff.numel()
+                    else 0.0,
+                    "all_logprobs_finite": bool(
+                        torch.isfinite(rollout_values).all()
+                        and torch.isfinite(actor_values).all()
+                        and torch.isfinite(logprob_diff).all()
+                    ),
+                    "token_ids_captured": index < token_sample_limit,
+                }
+            )
+        samples.append(sample)
     record = {
-        "schema_version": 1,
+        "schema_version": 2 if mode == "compact" else 1,
+        "mode": mode,
         "shape": list(rollout.shape),
+        "token_sample_limit": token_sample_limit,
         "samples": samples,
     }
     directory = os.path.dirname(path)
@@ -174,6 +213,11 @@ def _dump_train_infer_diff(
         stream.write(json.dumps(record, separators=(",", ":")) + "\n")
 
     raw_path = os.environ.get("VERL_TRAIN_INFER_RAW_DUMP")
+    # Compact telemetry is the performance-safe default: never create the
+    # legacy full-tensor .pt sidecar unless the caller explicitly requests a
+    # real path. Full diagnostic mode preserves the historical sidecar.
+    if mode == "compact" and not raw_path:
+        return
     if not raw_path:
         jsonl_path = Path(path)
         raw_path = str(jsonl_path.with_suffix(".pt"))

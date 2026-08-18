@@ -103,6 +103,45 @@ class TestMetrics(unittest.TestCase):
             assert not os.path.exists(path)
             assert not os.path.exists(os.path.join(directory, "diff.pt"))
 
+    def test_compact_train_infer_dump_keeps_aggregates_without_raw_sidecar(self):
+        rollout = torch.tensor([[-1.0, -2.0], [-3.0, -4.0]])
+        actor = torch.tensor([[-1.0, -2.5], [-2.0, -4.0]])
+        data = DataProto.from_dict(
+            tensors={
+                "rollout_log_probs": rollout,
+                "old_log_probs": actor,
+                "loss_mask": torch.ones_like(rollout, dtype=torch.int64),
+                "responses": torch.tensor([[7, 8], [9, 10]]),
+                "attention_mask": torch.ones((2, 4), dtype=torch.int64),
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "diff.jsonl")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "VERL_TRAIN_INFER_DIFF_DUMP": path,
+                    "VERL_TRAIN_INFER_DIFF_MODE": "compact",
+                    "VERL_TRAIN_INFER_TOKEN_SAMPLE_LIMIT": "1",
+                },
+            ):
+                calculate_debug_metrics(data)
+
+            record = json.loads(open(path, encoding="utf-8").read())
+            assert record["schema_version"] == 2
+            assert record["mode"] == "compact"
+            first, second = record["samples"]
+            assert first["token_ids"] == [7, 8]
+            assert second["token_ids"] == []
+            assert first["logprob_abs_diff_max"] == 0.5
+            assert first["logprob_abs_diff_sum"] == 0.5
+            assert first["bitwise_equal_count"] == 1
+            assert first["all_logprobs_finite"] is True
+            assert "rollout_log_probs" not in first
+            assert "actor_log_probs" not in first
+            assert "logprob_abs_diff" not in first
+            assert not os.path.exists(os.path.join(directory, "diff.pt"))
+
     def test_pre_forward_dump_survives_without_actor_log_probs(self):
         data = DataProto.from_dict(
             tensors={

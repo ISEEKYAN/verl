@@ -292,3 +292,60 @@ def test_ds4_refit_uses_native_layerwise_lifecycle(monkeypatch):
         "e_score_correction_bias",
         "attn_sink",
     }
+
+
+def test_ds4_native_reload_fingerprints_receiver_stream(monkeypatch):
+    mod, _ = _load_quant_utils(fused_moe_is_function=True)
+    events = []
+    config_module = _make_module("vllm.config")
+    reload_module = _make_module("vllm.model_executor.model_loader.reload")
+    reload_meta = _make_module("vllm.model_executor.model_loader.reload.meta")
+    reload_meta.SKIP_TENSORS = set()
+
+    @contextmanager
+    def set_current_vllm_config(config):
+        yield
+
+    config_module.set_current_vllm_config = set_current_vllm_config
+    reload_module.initialize_layerwise_reload = lambda model: None
+    reload_module.finalize_layerwise_processing = lambda model, model_config: None
+    fingerprint_module = _make_module(
+        "megatron.lite.primitive.ckpt.weight_sync_fingerprint"
+    )
+    fingerprint_module.tensor_fingerprint_record = (
+        lambda name, tensor: {"name": name, "value": tensor.clone()}
+    )
+    fingerprint_module.report_stream_fingerprint = (
+        lambda role, rank, records: events.append((role, rank, records))
+    )
+    monkeypatch.setitem(sys.modules, config_module.__name__, config_module)
+    monkeypatch.setitem(sys.modules, reload_module.__name__, reload_module)
+    monkeypatch.setitem(sys.modules, reload_meta.__name__, reload_meta)
+    monkeypatch.setitem(sys.modules, fingerprint_module.__name__, fingerprint_module)
+    monkeypatch.setenv("MLITE_WEIGHT_SYNC_FINGERPRINT", "1")
+
+    class Model(torch.nn.Module):
+        config = SimpleNamespace(model_type="deepseek_v4")
+
+        def load_weights(self, weights):
+            return [name for name, _ in weights]
+
+    model = Model()
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        quant_config=None,
+    )
+    runner = SimpleNamespace(model=model, vllm_config=vllm_config)
+    state = mod.prepare_quanted_weights_for_loading(model, vllm_config)
+    monkeypatch.setattr(mod, "quant_weights", lambda weights, *args, **kwargs: weights)
+    value = torch.tensor([1.0, 2.0])
+    assert mod.load_quanted_weights([("weight", value)], runner) == ["weight"]
+    mod.process_quanted_weights_after_loading(model, state, vllm_config)
+
+    assert len(events) == 1
+    role, rank, records = events[0]
+    assert role == "receiver"
+    assert rank == 0
+    assert len(records) == 1
+    assert records[0]["name"] == "weight"
+    assert torch.equal(records[0]["value"], value)

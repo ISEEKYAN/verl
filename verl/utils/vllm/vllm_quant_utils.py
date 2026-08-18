@@ -30,6 +30,7 @@ dispatch below stays unconditional.
 
 import importlib.metadata
 import logging
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
@@ -363,6 +364,13 @@ def prepare_quanted_weights_for_loading(model, vllm_config=None):
         with set_current_vllm_config(vllm_config):
             initialize_layerwise_reload(model)
         model._verl_dsv4_native_layerwise_reload_active = True
+        if os.getenv("MLITE_WEIGHT_SYNC_FINGERPRINT", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            model._verl_mlite_weight_fingerprint = []
         logger.warning("VERL_DSV4_NATIVE_LAYERWISE_RELOAD initialized")
         return {
             _NATIVE_DSV4_RELOAD_KEY: True,
@@ -392,6 +400,15 @@ def process_quanted_weights_after_loading(model, reload_state, vllm_config=None)
                 finalize_layerwise_processing(model, config.model_config)
         finally:
             model._verl_dsv4_native_layerwise_reload_active = False
+        records = getattr(model, "_verl_mlite_weight_fingerprint", None)
+        if records is not None:
+            from megatron.lite.primitive.ckpt.weight_sync_fingerprint import (
+                report_stream_fingerprint,
+            )
+
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            report_stream_fingerprint("receiver", rank, records)
+            del model._verl_mlite_weight_fingerprint
         clear_rocm_attention_weight_caches(model)
         logger.warning("VERL_DSV4_NATIVE_LAYERWISE_RELOAD finalized")
         return
@@ -417,6 +434,13 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
 
     weights = list(weights)
     if getattr(model, "_verl_dsv4_native_layerwise_reload_active", False):
+        records = getattr(model, "_verl_mlite_weight_fingerprint", None)
+        if records is not None:
+            from megatron.lite.primitive.ckpt.weight_sync_fingerprint import (
+                tensor_fingerprint_record,
+            )
+
+            records.extend(tensor_fingerprint_record(name, tensor) for name, tensor in weights)
         # Native online loaders may retain bucket arguments until their whole
         # logical layer is complete.  The IPC receiver reuses its communication
         # buffer after each callback, so detach every tensor from that storage.

@@ -38,6 +38,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from verl.plugin.platform import get_platform
+from verl.utils.batch_invariant import apply_batch_invariant, resolve_batch_invariant
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
@@ -135,6 +136,11 @@ class vLLMHttpServer:
         self.config = self._init_config(config)
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
+        apply_batch_invariant(
+            "rollout",
+            rollout_full_determinism=self.config.full_determinism,
+            evidence_role="vllm-rollout-server",
+        )
 
         if self.config.full_determinism:
             from verl.workers.engine.utils import enable_full_determinism
@@ -143,7 +149,6 @@ class vLLMHttpServer:
             enable_full_determinism(seed=rollout_seed)
             os.environ["VERL_FULL_DETERMINISM"] = "1"
             os.environ["VERL_SEED"] = str(rollout_seed)
-            os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
         self.rollout_mode = rollout_mode
         self.workers = workers
@@ -1177,6 +1182,10 @@ class vLLMReplica(RolloutReplica):
             env_vars = {
                 **{var: "1" for var in get_platform().ray_noset_envvars()},
                 **get_platform().rollout_env_vars(),
+                "VLLM_BATCH_INVARIANT": resolve_batch_invariant(
+                    "rollout",
+                    rollout_full_determinism=self.config.full_determinism,
+                ),
             }
 
             server = self.server_class.options(

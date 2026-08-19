@@ -25,6 +25,7 @@ from typing import Any, Literal, Optional, get_args
 import torch
 from vllm.outputs import RequestOutput
 
+from verl.utils.batch_invariant import apply_batch_invariant
 from verl.utils.device import get_device_name, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
@@ -140,6 +141,7 @@ class vLLMColocateWorkerExtension:
 
     def __new__(cls, **kwargs):
         set_death_signal()
+        apply_batch_invariant("rollout", evidence_role="vllm-rollout-subprocess")
 
         if os.environ.get("VERL_FULL_DETERMINISM", "0") == "1":
             from verl.workers.engine.utils import enable_full_determinism

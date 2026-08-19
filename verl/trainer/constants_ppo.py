@@ -121,6 +121,8 @@ def get_ppo_ray_runtime_env(config=None):
     # Always forward these at call-time, not import-time.
     for key in (
         "VERL_FULL_DETERMINISM",
+        "VERL_ACTOR_BATCH_INVARIANT",
+        "VERL_ROLLOUT_BATCH_INVARIANT",
         "VLLM_BATCH_INVARIANT",
         "VLLM_DS4_DECODE_KERNEL",
         "VLLM_BATCH_INVARIANT_KERNEL_LIB",

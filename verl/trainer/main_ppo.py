@@ -26,6 +26,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
+from verl.utils.batch_invariant import scope_batch_invariant_env
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
@@ -81,13 +82,22 @@ def run_ppo(config, task_runner_class, local_task_runner_class=None) -> None:
                 model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
-    # Propagate determinism env vars from config before ray.init() so
-    # get_ppo_ray_runtime_env() forwards them to all Ray actors.
     rollout_cfg = config.actor_rollout_ref.rollout
     rm_rollout_cfg = config.reward.reward_model.rollout
-    if rollout_cfg.full_determinism or (config.reward.reward_model.enable and rm_rollout_cfg.full_determinism):
+    rollout_full_determinism = rollout_cfg.full_determinism or (
+        config.reward.reward_model.enable and rm_rollout_cfg.full_determinism
+    )
+
+    # Resolve role inputs before neutralizing the legacy process-global input.
+    # Role workers install their resolved value before initializing their model.
+    scope_batch_invariant_env(
+        rollout_full_determinism=rollout_full_determinism,
+    )
+
+    # Propagate non-role-specific determinism env vars from config before
+    # ray.init() so get_ppo_ray_runtime_env() forwards them to all Ray actors.
+    if rollout_full_determinism:
         os.environ["VERL_FULL_DETERMINISM"] = "1"
-        os.environ["VLLM_BATCH_INVARIANT"] = "1"
         os.environ["PYTHONHASHSEED"] = str(rollout_cfg.seed)
         os.environ["VERL_DETERMINISM_SEED"] = str(rollout_cfg.seed)
 

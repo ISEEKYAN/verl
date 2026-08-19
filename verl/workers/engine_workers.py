@@ -32,6 +32,7 @@ from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
 from verl.utils import tensordict_utils as tu
+from verl.utils.batch_invariant import apply_batch_invariant
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name, get_torch_device, set_expandable_segments
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
@@ -470,6 +471,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
+        if self._is_actor:
+            apply_batch_invariant("actor", evidence_role="actor-worker")
 
         if self._is_actor:
             omega_profiler_config = config.actor.get("profiler", {})

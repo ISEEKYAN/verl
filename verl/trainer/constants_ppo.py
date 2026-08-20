@@ -118,34 +118,45 @@ def get_ppo_ray_runtime_env(config=None):
             # Explicitly forward driver overrides. A local Ray head inherits the
             # environment, but a prestarted/shared head does not.
             runtime_env["env_vars"][key] = value
-    # Always forward these at call-time, not import-time.
+    # Boolean switches are safe to default to disabled. Do not put timeouts,
+    # paths, enum-like values, or backend names in this list: the string "0"
+    # is not equivalent to leaving those variables unset and suppresses their
+    # component-level defaults.
     for key in (
         "VERL_FULL_DETERMINISM",
+        "VERL_ACTOR_BATCH_INVARIANT",
+        "VERL_ROLLOUT_BATCH_INVARIANT",
         "VLLM_BATCH_INVARIANT",
-        "VLLM_DS4_DECODE_KERNEL",
-        "VLLM_DS4_ALIGNMENT_KERNEL_LIB",
         "VERL_RL_INSIGHT_ENABLE",
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
         "VERL_MLITE_SKIP_RUNTIME_PATCHES",
         "VERL_ENGINE_LAZY_IMPORTS",
+        "MLITE_WEIGHT_SYNC_FINGERPRINT",
+        "MLITE_WEIGHT_SYNC_PROBE",
+    ):
+        runtime_env["env_vars"][key] = os.environ.get(key, "0")
+    # Forward non-boolean configuration only when explicitly set. This keeps
+    # each consumer's tested default and avoids zero-timeout/relative-path
+    # regressions in Ray workers.
+    for key in (
+        "VLLM_DS4_DECODE_KERNEL",
+        "VLLM_BATCH_INVARIANT_KERNEL_LIB",
         "VERL_VLLM_LAUNCH_TIMEOUT_S",
         "MLITE_DISTRIBUTED_TIMEOUT_S",
         "MLITE_WEIGHT_SYNC_TIMEOUT_S",
-        "MLITE_WEIGHT_SYNC_FINGERPRINT",
-        "MLITE_WEIGHT_SYNC_PROBE",
         "MLITE_WEIGHT_SYNC_PROBE_BACKEND",
-        "VERL_DISTRIBUTED_TIMEOUT_S",
         "VERL_UVICORN_STARTUP_TIMEOUT_S",
         "VERL_SERVER_ACQUIRE_TIMEOUT_S",
-        "VLLM_CACHE_ROOT",
-    ):
-        runtime_env["env_vars"][key] = os.environ.get(key, "0")
-    # Forward only when set: empty string breaks vLLM ParallelConfig int parsing.
-    for key in (
         "PYTHONHASHSEED",
         "VERL_DETERMINISM_SEED",
         "PYTHONPATH",
         "DEEPGEMM_SITE",
+        "VERL_DISTRIBUTED_TIMEOUT_S",
+        "VLLM_CACHE_ROOT",
+        "DG_JIT_CACHE_DIR",
+        "TRITON_CACHE_DIR",
+        "TILELANG_CACHE_DIR",
+        "TORCHINDUCTOR_CACHE_DIR",
         "CUDA_LAUNCH_BLOCKING",
         "MLITE_VALIDATE_FINITE",
         "MLITE_VALIDATE_INDICES",

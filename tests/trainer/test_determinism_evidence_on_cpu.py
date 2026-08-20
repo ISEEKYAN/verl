@@ -1,14 +1,20 @@
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from verl.single_controller.base.worker import collect_determinism_evidence
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
 
 def test_runtime_env_forwards_determinism_evidence_inputs(monkeypatch) -> None:
     expected = {
+        "VERL_ACTOR_BATCH_INVARIANT": "0",
+        "VERL_ROLLOUT_BATCH_INVARIANT": "1",
         "VLLM_BATCH_INVARIANT": "1",
-        "VLLM_DS4_ALIGNMENT_KERNEL_LIB": "/workspace/libds4_alignment.so",
+        "VLLM_BATCH_INVARIANT_KERNEL_LIB": (
+            "/workspace/_vllm_batch_invariant_C.so"
+        ),
         "VERL_FULL_DETERMINISM": "1",
         "VERL_DETERMINISM_SEED": "42",
         "PYTHONHASHSEED": "42",
@@ -21,6 +27,29 @@ def test_runtime_env_forwards_determinism_evidence_inputs(monkeypatch) -> None:
     runtime_env = get_ppo_ray_runtime_env()
 
     assert {key: runtime_env["env_vars"][key] for key in expected} == expected
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("VERL_DISTRIBUTED_TIMEOUT_S", "123"),
+        ("VLLM_CACHE_ROOT", "/cache/vllm"),
+        ("VLLM_DS4_DECODE_KERNEL", "sparse"),
+        ("VLLM_BATCH_INVARIANT_KERNEL_LIB", "/opt/bi.so"),
+        ("VERL_VLLM_LAUNCH_TIMEOUT_S", "1800"),
+        ("MLITE_DISTRIBUTED_TIMEOUT_S", "300"),
+        ("MLITE_WEIGHT_SYNC_TIMEOUT_S", "300"),
+        ("MLITE_WEIGHT_SYNC_PROBE_BACKEND", "mlite_vllm"),
+        ("VERL_UVICORN_STARTUP_TIMEOUT_S", "60"),
+        ("VERL_SERVER_ACQUIRE_TIMEOUT_S", "300"),
+    ],
+)
+def test_runtime_env_preserves_optional_defaults(monkeypatch, key, value) -> None:
+    monkeypatch.delenv(key, raising=False)
+    assert key not in get_ppo_ray_runtime_env()["env_vars"]
+
+    monkeypatch.setenv(key, value)
+    assert get_ppo_ray_runtime_env()["env_vars"][key] == value
 
 
 def test_collect_determinism_evidence_reports_deep_gemm_getter(monkeypatch) -> None:

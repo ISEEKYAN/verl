@@ -34,12 +34,16 @@ def test_runtime_env_forwards_determinism_evidence_inputs(monkeypatch) -> None:
     assert {key: runtime_env["env_vars"][key] for key in expected} == expected
 
 
-def test_runtime_env_preserves_distributed_timeout_default(monkeypatch) -> None:
-    monkeypatch.delenv("VERL_DISTRIBUTED_TIMEOUT_S", raising=False)
-    assert "VERL_DISTRIBUTED_TIMEOUT_S" not in get_ppo_ray_runtime_env()["env_vars"]
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("VERL_DISTRIBUTED_TIMEOUT_S", "123"), ("VLLM_CACHE_ROOT", "/cache/vllm")],
+)
+def test_runtime_env_preserves_optional_defaults(monkeypatch, key, value) -> None:
+    monkeypatch.delenv(key, raising=False)
+    assert key not in get_ppo_ray_runtime_env()["env_vars"]
 
-    monkeypatch.setenv("VERL_DISTRIBUTED_TIMEOUT_S", "123")
-    assert get_ppo_ray_runtime_env()["env_vars"]["VERL_DISTRIBUTED_TIMEOUT_S"] == "123"
+    monkeypatch.setenv(key, value)
+    assert get_ppo_ray_runtime_env()["env_vars"][key] == value
 
 
 def test_role_scoped_batch_invariant_inputs_are_independent() -> None:

@@ -138,7 +138,6 @@ def get_ppo_ray_runtime_env(config=None):
         "MLITE_WEIGHT_SYNC_PROBE_BACKEND",
         "VERL_UVICORN_STARTUP_TIMEOUT_S",
         "VERL_SERVER_ACQUIRE_TIMEOUT_S",
-        "VLLM_CACHE_ROOT",
     ):
         runtime_env["env_vars"][key] = os.environ.get(key, "0")
     # Forward only when set: empty string breaks vLLM ParallelConfig int parsing.
@@ -148,6 +147,11 @@ def get_ppo_ray_runtime_env(config=None):
         "PYTHONPATH",
         "DEEPGEMM_SITE",
         "VERL_DISTRIBUTED_TIMEOUT_S",
+        "VLLM_CACHE_ROOT",
+        "DG_JIT_CACHE_DIR",
+        "TRITON_CACHE_DIR",
+        "TILELANG_CACHE_DIR",
+        "TORCHINDUCTOR_CACHE_DIR",
         "CUDA_LAUNCH_BLOCKING",
         "MLITE_VALIDATE_FINITE",
         "MLITE_VALIDATE_INDICES",

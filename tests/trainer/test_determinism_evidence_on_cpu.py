@@ -36,7 +36,18 @@ def test_runtime_env_forwards_determinism_evidence_inputs(monkeypatch) -> None:
 
 @pytest.mark.parametrize(
     ("key", "value"),
-    [("VERL_DISTRIBUTED_TIMEOUT_S", "123"), ("VLLM_CACHE_ROOT", "/cache/vllm")],
+    [
+        ("VERL_DISTRIBUTED_TIMEOUT_S", "123"),
+        ("VLLM_CACHE_ROOT", "/cache/vllm"),
+        ("VLLM_DS4_DECODE_KERNEL", "sparse"),
+        ("VLLM_BATCH_INVARIANT_KERNEL_LIB", "/opt/bi.so"),
+        ("VERL_VLLM_LAUNCH_TIMEOUT_S", "1800"),
+        ("MLITE_DISTRIBUTED_TIMEOUT_S", "300"),
+        ("MLITE_WEIGHT_SYNC_TIMEOUT_S", "300"),
+        ("MLITE_WEIGHT_SYNC_PROBE_BACKEND", "mlite_vllm"),
+        ("VERL_UVICORN_STARTUP_TIMEOUT_S", "60"),
+        ("VERL_SERVER_ACQUIRE_TIMEOUT_S", "300"),
+    ],
 )
 def test_runtime_env_preserves_optional_defaults(monkeypatch, key, value) -> None:
     monkeypatch.delenv(key, raising=False)

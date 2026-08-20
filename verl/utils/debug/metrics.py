@@ -332,7 +332,7 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     rollout_log_probs_valid = torch.masked_select(rollout_old_log_probs, response_mask_bool)
     actor_log_probs_valid = torch.masked_select(actor_old_log_probs, response_mask_bool)
     logprob_abs_diff = torch.abs(rollout_log_probs_valid - actor_log_probs_valid)
-    return {
+    result = {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).detach().item(),
@@ -348,3 +348,18 @@ def calculate_debug_metrics(data: DataProto) -> dict:
         .detach()
         .item(),
     }
+    # Reuse VERL's rollout-correction implementation as the authoritative
+    # policy-gap metric even when rollout correction itself is disabled.
+    from verl.trainer.ppo.rollout_corr_helper import compute_offpolicy_metrics
+
+    result.update(
+        {
+            f"rollout_corr/{name}": value
+            for name, value in compute_offpolicy_metrics(
+                old_log_prob=actor_old_log_probs,
+                rollout_log_prob=rollout_old_log_probs,
+                response_mask=response_mask,
+            ).items()
+        }
+    )
+    return result

@@ -1626,7 +1626,8 @@ class RayPPOTrainer:
                                 print(
                                     "RL_STAGE old_log_prob_done "
                                     f"step={self.global_steps} samples={len(batch)} "
-                                    f"bitwise_fraction={metrics.get('training/rollout_logprob_bitwise_equal_fraction')}",
+                                    f"bitwise_fraction={metrics.get('training/rollout_logprob_bitwise_equal_fraction')} "
+                                    f"k3_kl={metrics.get('rollout_corr/k3_kl')}",
                                     flush=True,
                                 )
                                 if _finalize_train_infer_only(

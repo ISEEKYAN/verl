@@ -46,6 +46,14 @@ class TestMetrics(unittest.TestCase):
         metrics = calculate_debug_metrics(data)
         print(metrics)
         assert metrics["training/rollout_probs_diff_valid"] == 1
+        from verl.trainer.ppo.rollout_corr_helper import compute_offpolicy_metrics
+
+        expected = compute_offpolicy_metrics(
+            old_log_prob=data.batch["old_log_probs"],
+            rollout_log_prob=data.batch["rollout_log_probs"],
+            response_mask=data.batch["loss_mask"],
+        )
+        assert metrics["rollout_corr/k3_kl"] == expected["k3_kl"]
 
     def test_calculate_debug_metrics_can_dump_token_level_diff(self):
         rollout = torch.tensor([[-1.0, -2.0]], dtype=torch.float16)

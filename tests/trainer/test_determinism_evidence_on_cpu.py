@@ -34,6 +34,14 @@ def test_runtime_env_forwards_determinism_evidence_inputs(monkeypatch) -> None:
     assert {key: runtime_env["env_vars"][key] for key in expected} == expected
 
 
+def test_runtime_env_preserves_distributed_timeout_default(monkeypatch) -> None:
+    monkeypatch.delenv("VERL_DISTRIBUTED_TIMEOUT_S", raising=False)
+    assert "VERL_DISTRIBUTED_TIMEOUT_S" not in get_ppo_ray_runtime_env()["env_vars"]
+
+    monkeypatch.setenv("VERL_DISTRIBUTED_TIMEOUT_S", "123")
+    assert get_ppo_ray_runtime_env()["env_vars"]["VERL_DISTRIBUTED_TIMEOUT_S"] == "123"
+
+
 def test_role_scoped_batch_invariant_inputs_are_independent() -> None:
     env = {
         "VERL_ACTOR_BATCH_INVARIANT": "0",

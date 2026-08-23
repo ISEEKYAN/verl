@@ -33,6 +33,11 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
+def _align_offset(offset: int, dtype: torch.dtype) -> int:
+    alignment = dtype.itemsize
+    return (offset + alignment - 1) // alignment * alignment
+
+
 class TensorMetadata(TypedDict):
     name: str
     shape: torch.Size
@@ -125,15 +130,18 @@ class BucketedWeightSender:
                 # transfer volume.
                 # weight = weight.to(dtype, non_blocking=True)
 
-                # fill the tensor bucket
-                if offset + weight.nbytes > self.bucket_size and len(bucket_meta) > 0:
+                # A uint8 bucket may contain mixed dtypes. Align each tensor's
+                # byte offset before creating a typed view of the storage.
+                aligned_offset = _align_offset(offset, weight.dtype)
+                if aligned_offset + weight.nbytes > self.bucket_size and len(bucket_meta) > 0:
                     get_torch_device().synchronize()
                     self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
                     self.socket.recv()
                     bucket_meta = {}
                     offset = 0
+                    aligned_offset = 0
 
-                if offset + weight.nbytes > self.bucket_size:
+                if aligned_offset + weight.nbytes > self.bucket_size:
                     assert not self.use_shm, (
                         f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
                         f"Please increase rollout.update_weights_bucket_megabytes({self.bucket_size_mb} MB)."
@@ -145,13 +153,13 @@ class BucketedWeightSender:
                     "name": name,
                     "shape": weight.shape,
                     "dtype": weight.dtype,
-                    "offset": offset,
+                    "offset": aligned_offset,
                     "handle": None,
                 }
-                self.buffer[offset : offset + weight.nbytes].view(dtype=weight.dtype).view(weight.shape).copy_(
-                    weight, non_blocking=True
-                )
-                offset += weight.nbytes
+                self.buffer[aligned_offset : aligned_offset + weight.nbytes].view(dtype=weight.dtype).view(
+                    weight.shape
+                ).copy_(weight, non_blocking=True)
+                offset = aligned_offset + weight.nbytes
 
             # send the last bucket
             get_torch_device().synchronize()

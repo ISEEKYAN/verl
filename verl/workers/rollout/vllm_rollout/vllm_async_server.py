@@ -13,6 +13,7 @@
 # limitations under the License.
 import argparse
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -575,9 +576,16 @@ class vLLMHttpServer:
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
-        # Inject per-request seed for deterministic sampling when full_determinism is enabled.
+        # Stable request-specific seeds preserve full determinism without collapsing
+        # all n samples handled by one EP replica to the same random stream.
         if self.config.full_determinism:
-            sampling_params.setdefault("seed", self.replica_rank + self.config.seed)
+            request_hash = int.from_bytes(
+                hashlib.blake2s(request_id.encode("utf-8"), digest_size=4).digest(),
+                "little",
+            )
+            sampling_params.setdefault(
+                "seed", (int(self.config.seed) + request_hash) & 0x7FFFFFFF
+            )
 
         if kv_transfer_params is not None:
             extra_args = dict(sampling_params.pop("extra_args", None) or {})

@@ -2,10 +2,10 @@
 defaults:
 
   # mindspeed optimizer config
-  - ../optim@optim: megatron
+  - /optim@optim: megatron
 
   # mindspeed engine config
-  - ../engine@mindspeed:
+  - /engine@mindspeed:
       - megatron
       - mindspeed
 

@@ -1,8 +1,8 @@
 # mindspeed actor config, inheriting from trainer/config/actor/actor.yaml
 defaults:
-  - ../optim@optim: megatron
+  - /optim@optim: megatron
 
-  - ../engine@mindspeed:
+  - /engine@mindspeed:
       - megatron
       - mindspeed
 

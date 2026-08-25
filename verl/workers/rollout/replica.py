@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import os
+import socket
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -25,8 +26,9 @@ from ray.actor import ActorHandle
 
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, get_resource_name
 from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.rollout.worker_ordering import order_hybrid_workers
 
 logger = logging.getLogger(__file__)
 
@@ -135,7 +137,28 @@ class RolloutReplica(ABC):
             worker_group: RayWorkerGroup, fused workers where training engine(fsdp/megatron) have been initialized.
         """
         self.rollout_mode = RolloutMode.HYBRID
-        self.workers = worker_group.workers[
+        worker_infos = await asyncio.gather(
+            *[
+                worker.__ray_call__.remote(
+                    lambda self: (
+                        ray.get_runtime_context().get_node_id(),
+                        socket.gethostname(),
+                        ray.get_runtime_context().get_accelerator_ids()[get_resource_name()][0],
+                    )
+                )
+                for worker in worker_group.workers
+            ]
+        )
+        node_grouped_workers = order_hybrid_workers(
+            (
+                (worker, node_id, hostname, device_id)
+                for worker, (node_id, hostname, device_id) in zip(
+                    worker_group.workers, worker_infos, strict=True
+                )
+            ),
+            self.gpus_per_node,
+        )
+        self.workers = node_grouped_workers[
             self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
         ]
         await self.launch_servers()

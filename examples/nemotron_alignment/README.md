@@ -182,3 +182,26 @@ The original squashfs image's embedded README predates this launcher; this
 document is the current reproduction entrypoint. These are fork-review Draft PRs, not
 upstream-approved releases; the known verl copyright-header check remains
 to be resolved before upstreaming.
+# Baiyan-fork migration status
+
+This branch ports the Nemotron adapter to `ISEEKYAN/verl:main` at `45cbfcfa`.
+The FSDP image and numerical results below describe the **previous tested source
+baseline**, not a GPU rerun of this port. The companion vLLM port targets
+`ISEEKYAN/vllm:ds4-v9-rc1` and also needs fresh GPU validation.
+
+Native Megatron/mlite training is a separate implementation in
+[Megatron-LM PR #226](https://github.com/ISEEKYAN/Megatron-LM/pull/226), not the
+FSDP bridge below. Its full52 two-step run had exact response logprobs but zero
+advantages/gradients; it does not establish effective-learning alignment.
+
+The native integration uses these additional verl changes in this branch:
+
+- `VERL_REQUIRE_BITWISE_LOGPROBS=1`: reject empty/nonfinite or byte-unequal
+  response logprobs before the actor update.
+- Derive deterministic sampling seeds per trajectory/session, preserving
+  explicit caller seeds instead of collapsing all GRPO siblings to one sample.
+- Keep centralized multi-node vLLM DP launch on the API node; only remote
+  headless nodes receive an explicit `data_parallel_start_rank`.
+
+No reward parser change is included. The published image remains the historical
+FSDP image, not a native mlite or newly rebased release.

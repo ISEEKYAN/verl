@@ -127,9 +127,9 @@ else
 fi
 
 # Alignment behavior belongs to the mode, not to the hardware profile.
+: "${ROLLOUT_MAX_NUM_BATCHED_TOKENS:=8192}"
 MODE_ARGS=()
 if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
-  : "${ROLLOUT_MAX_NUM_BATCHED_TOKENS:=2048}"
   : "${ROLLOUT_MOE_BACKEND:=deep_gemm}"
   export VLLM_BATCH_INVARIANT=1
   export VLLM_DS4_DECODE_KERNEL=sparse
@@ -146,7 +146,6 @@ if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
     +actor_rollout_ref.rollout.engine_kwargs.vllm.linear_backend=deep_gemm
   )
 else
-  : "${ROLLOUT_MAX_NUM_BATCHED_TOKENS:=8192}"
   : "${ROLLOUT_MOE_BACKEND:=auto}"
   export VLLM_BATCH_INVARIANT=0
   export VLLM_DS4_DECODE_KERNEL=paged

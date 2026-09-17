@@ -11,13 +11,8 @@ ARG TARGETARCH=amd64
 # baked into the image. VERL and Megatron-LM are mounted at run time.
 ARG VLLM_REPO=https://github.com/ISEEKYAN/vllm.git
 ARG VLLM_REF=refs/heads/ds4-v9-rc1
-ARG VLLM_REVISION=1912dfcd35bffd995b7845120ad8ad595be0ace3
-ARG VLLM_TREE=57f2312769117432f178be7dd29f1c38cbf8623c
-ARG VLLM_WHEEL_COMMIT=7aa248fcfef5ba7a6bfb0ce314e328ce63abb9f9
-ARG VLLM_WHEEL_VERSION=0.26.1rc1.dev682+g7aa248fcf
-ARG VLLM_WHEEL_URL_VERSION=0.26.1rc1.dev682%2Bg7aa248fcf
-ARG VLLM_WHEEL_SHA256_AMD64=3093b6b2c0c2eb07d82b046f9dfd02f959b1c74ac1e95dcdc5864ae61d1e9caf
-ARG VLLM_WHEEL_SHA256_ARM64=489205054640e00f956edcf85cd58ff2152876666898f24168144d159f1fcafe
+ARG VLLM_REVISION=168a040e0a983404e78ea86c367be0cfa80424fd
+ARG VLLM_TREE=8ebbe4006d30144fe0d1243e2aa865a2911e9d54
 
 ARG DEEPGEMM_REPO=https://github.com/ISEEKYAN/DeepGEMM.git
 ARG DEEPGEMM_REVISION=dfad2230d33ac6bb853b00e56a1c94664f4fe195
@@ -38,11 +33,6 @@ ARG VLLM_REPO
 ARG VLLM_REF
 ARG VLLM_REVISION
 ARG VLLM_TREE
-ARG VLLM_WHEEL_COMMIT
-ARG VLLM_WHEEL_VERSION
-ARG VLLM_WHEEL_URL_VERSION
-ARG VLLM_WHEEL_SHA256_AMD64
-ARG VLLM_WHEEL_SHA256_ARM64
 ARG DEEPGEMM_REPO
 ARG DEEPGEMM_REVISION
 ARG DEEPEP_REPO
@@ -57,6 +47,11 @@ ENV VIRTUAL_ENV=/opt/ds4-venv \
     PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1 \
     TORCH_EXTENSIONS_DIR=/src/build/torch-extensions
 WORKDIR /src
+
+RUN apt-get -o APT::Sandbox::User=root update && \
+    apt-get -o APT::Sandbox::User=root install -y --no-install-recommends \
+      libdw-dev libelf-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
 # Target architecture and source checkouts
@@ -93,9 +88,6 @@ git -C /src/vllm fetch --depth 2048 origin "${VLLM_REF}"
 git -C /src/vllm checkout --detach "${VLLM_REVISION}"
 test "$(git -C /src/vllm rev-parse HEAD)" = "${VLLM_REVISION}"
 test "$(git -C /src/vllm rev-parse HEAD^{tree})" = "${VLLM_TREE}"
-git -C /src/vllm fetch --depth 1 origin "${VLLM_WHEEL_COMMIT}"
-test "$(git -C /src/vllm merge-base "${VLLM_REVISION}" "${VLLM_WHEEL_COMMIT}")" = \
-  "${VLLM_WHEEL_COMMIT}"
 
 clone_exact DeepGEMM "${DEEPGEMM_REPO}" "${DEEPGEMM_REVISION}"
 clone_exact DeepEP "${DEEPEP_REPO}" "${DEEPEP_REVISION}"
@@ -106,13 +98,14 @@ uv venv --seed --system-site-packages --python "$(command -v python3)" "${VIRTUA
 EOF
 
 # -----------------------------------------------------------------------------
-# Python runtime and verified vLLM wheel/source overlay
+# Python runtime and vLLM wheel built from the pinned source tree
 # -----------------------------------------------------------------------------
 RUN --mount=type=cache,target=/root/.cache/uv <<'EOF'
 set -eux
 uv pip install PyYAML==6.0.3 pyarrow==25.0.1 datasets==5.0.1 \
   jsonschema==4.26.0 wheel==0.48.0 ninja==1.13.0 cmake==4.4.2 \
-  packaging==25.0 setuptools==80.10.2 pytest==9.1.1 tblib==3.2.2 \
+  packaging==25.0 setuptools==80.10.2 build==1.3.0 "setuptools-rust>=1.9.0" \
+  "setuptools-scm>=8.0" pytest==9.1.1 tblib==3.2.2 \
   accelerate==1.14.0 codetiming==1.4.0 hydra-core==1.4.0.dev8 \
   peft==0.20.0 pylatexenc==3.0b2 "ray[default]==2.57.0" tensordict==0.10.0 \
   torchaudio==2.11.0 torchvision==0.28.0
@@ -125,35 +118,17 @@ uv pip install --extra-index-url https://flashinfer.ai/whl/ \
   tilelang==0.1.12 nvidia-cudnn-frontend==1.27.0 \
   "nvidia-cutlass-dsl[cu13]==4.6.2" quack-kernels==0.6.4
 
-case "${TARGETARCH}" in
-  amd64)
-    wheel_platform=x86_64
-    wheel_sha="${VLLM_WHEEL_SHA256_AMD64}"
-    ;;
-  arm64)
-    wheel_platform=aarch64
-    wheel_sha="${VLLM_WHEEL_SHA256_ARM64}"
-    ;;
-esac
-wheel="/tmp/vllm-${VLLM_WHEEL_VERSION}-cp38-abi3-manylinux_2_28_${wheel_platform}.whl"
-curl -fL --retry 3 -o "${wheel}" \
-  "https://wheels.vllm.ai/${VLLM_WHEEL_COMMIT}/vllm-${VLLM_WHEEL_URL_VERSION}-cp38-abi3-manylinux_2_28_${wheel_platform}.whl"
-printf '%s  %s\n' "${wheel_sha}" "${wheel}" | sha256sum -c -
-uv pip install --no-deps --only-binary :all: "${wheel}"
-
-site=/opt/ds4-venv/lib/python3.12/site-packages/vllm
-git -C /src/vllm diff --name-only --diff-filter=ACMRTUXB \
-  "${VLLM_WHEEL_COMMIT}" "${VLLM_REVISION}" -- vllm |
-while IFS= read -r path; do
-  target="${site}/${path#vllm/}"
-  mkdir -p "$(dirname "${target}")"
-  cp -a "/src/vllm/${path}" "${target}"
-done
-git -C /src/vllm diff --name-only --diff-filter=D \
-  "${VLLM_WHEEL_COMMIT}" "${VLLM_REVISION}" -- vllm |
-while IFS= read -r path; do rm -rf "${site}/${path#vllm/}"; done
+. /tmp/ds4-arch.env
+mkdir -p /tmp/wheels/vllm
+(cd /src/vllm && /opt/ds4-venv/bin/python -m build --wheel \
+  --no-isolation --outdir /tmp/wheels/vllm)
+wheel=$(find /tmp/wheels/vllm -maxdepth 1 -type f -name 'vllm-*.whl' \
+  -print -quit)
+test -n "${wheel}"
+mkdir -p /opt/ds4
+sha256sum "${wheel}" | cut -d' ' -f1 >/opt/ds4/vllm-wheel.sha256
+uv pip install --no-deps "${wheel}"
 uv pip check || true
-rm -f "${wheel}"
 EOF
 
 # -----------------------------------------------------------------------------
@@ -180,6 +155,7 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${TORCH_CXX_FLAGS}")
 
 add_library(_vllm_batch_invariant_C SHARED
   /src/vllm/csrc/batch_invariant/fused_silu_mul_per_token_group_quant.cu
+  /src/vllm/csrc/batch_invariant/sparse_index.cu
   /src/vllm/csrc/batch_invariant/top_k.cu
   /src/vllm/csrc/batch_invariant/torch_bindings.cpp)
 target_include_directories(_vllm_batch_invariant_C PRIVATE /src/vllm/csrc)
@@ -273,6 +249,11 @@ for library in /opt/ds4/kernels/_vllm_batch_invariant_C.so; do
   test -s "${library}"
   if ldd "${library}" | grep -Fq 'not found'; then exit 1; fi
 done
+wheel_sha=$(cat /opt/ds4/vllm-wheel.sha256)
+bi_sha=$(sha256sum /opt/ds4/kernels/_vllm_batch_invariant_C.so | cut -d' ' -f1)
+printf '{"schema":"ds4-bi-image-closure/v2","vllm_revision":"%s","vllm_tree":"%s","vllm_wheel_sha256":"%s","bi_library_sha256":"%s","flashinfer_version":"0.6.18"}\n' \
+  "${VLLM_REVISION}" "${VLLM_TREE}" "${wheel_sha}" "${bi_sha}" \
+  >/opt/ds4/image-manifest.json
 rm -rf /src /tmp/wheels /tmp/ds4-kernels /tmp/ds4-arch.env /root/.cache
 EOF
 

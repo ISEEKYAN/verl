@@ -316,7 +316,8 @@ if (( NNODES > 1 )); then
   done
 fi
 
-for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL; do
+for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL \
+  VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL NCCL_MNNVL_ENABLE; do
   if [[ -v "${name}" ]]; then
     RAY_RUNTIME_ENV+=(
       "+ray_kwargs.ray_init.runtime_env.env_vars.${name}=\"${!name}\""

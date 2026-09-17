@@ -27,7 +27,6 @@ ACTOR_OPTIMIZER="${ACTOR_OPTIMIZER:-dist_opt}"
 
 VLLM_BATCH_INVARIANT_KERNEL_LIB="${VLLM_BATCH_INVARIANT_KERNEL_LIB:-/opt/ds4/kernels/_vllm_batch_invariant_C.so}"
 DS4_BI_TOPK_LIB="${DS4_BI_TOPK_LIB:-/opt/ds4/kernels/ds4_bi_topk.so}"
-export VLLM_BATCH_INVARIANT_KERNEL_LIB DS4_BI_TOPK_LIB
 
 usage() {
   echo "usage: $0 --hardware {h100|gb200} --mode {quick_alignment_test|aligned|baseline-r3} [Hydra overrides...]"
@@ -130,9 +129,12 @@ fi
 # Alignment behavior belongs to the mode, not to the hardware profile.
 MODE_ARGS=()
 if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
+  : "${ROLLOUT_MAX_NUM_BATCHED_TOKENS:=2048}"
+  : "${ROLLOUT_MOE_BACKEND:=deep_gemm}"
   export VLLM_BATCH_INVARIANT=1
   export VLLM_DS4_DECODE_KERNEL=sparse
   export VERL_FULL_DETERMINISM=1
+  export VLLM_BATCH_INVARIANT_KERNEL_LIB DS4_BI_TOPK_LIB
   MODE_ARGS=(
     actor_rollout_ref.actor.engine.impl=vllm
     +actor_rollout_ref.actor.engine.seed="${SEED}"
@@ -144,9 +146,12 @@ if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
     +actor_rollout_ref.rollout.engine_kwargs.vllm.linear_backend=deep_gemm
   )
 else
+  : "${ROLLOUT_MAX_NUM_BATCHED_TOKENS:=8192}"
+  : "${ROLLOUT_MOE_BACKEND:=auto}"
   export VLLM_BATCH_INVARIANT=0
   export VLLM_DS4_DECODE_KERNEL=paged
   export VERL_FULL_DETERMINISM=0
+  unset VLLM_BATCH_INVARIANT_KERNEL_LIB DS4_BI_TOPK_LIB
   MODE_ARGS=(
     actor_rollout_ref.actor.engine.attention_backend_override=fused
     +actor_rollout_ref.actor.engine.impl_cfg.use_deepep=True
@@ -238,7 +243,6 @@ fi
 
 ROLLOUT_TP="${ROLLOUT_TP:-1}"
 MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
-ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-2048}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/workspace/outputs/ds4_true_on_policy_preview/${HARDWARE}/${MODE}}"
 RUN_NAME="${RUN_NAME:-ds4_v4_${HARDWARE}_${MODE//-/_}}"
 CKPT_DIR="${CKPT_DIR:-${OUTPUT_ROOT}/checkpoints/${RUN_NAME}}"
@@ -256,7 +260,6 @@ mkdir -p \
 export VERL_FILE_LOGGER_PATH="${JSONL_FILE}"
 
 # --- Internal container/Ray environment; normally do not edit ---
-export CUDA_DEVICE_MAX_CONNECTIONS=1
 export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
 export PATH="/opt/ds4-venv/bin:/usr/local/cuda/bin:/usr/bin:/bin"
 export PYTHONNOUSERSITE=1
@@ -288,15 +291,17 @@ fi
 # Exporting in this launcher is not enough for an existing Ray cluster.
 RAY_ENV_NAMES=(
   PATH PYTHONPATH LD_LIBRARY_PATH
-  PYTHONNOUSERSITE CUDA_DEVICE_MAX_CONNECTIONS
+  PYTHONNOUSERSITE
   RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES
   PYTHONHASHSEED VLLM_BATCH_INVARIANT VERL_FULL_DETERMINISM
-  VLLM_BATCH_INVARIANT_KERNEL_LIB DS4_BI_TOPK_LIB
   DEEPEP_MAX_NVL_PEERS NVSHMEM_MAX_TEAMS NVSHMEM_DISABLE_NCCL
   VLLM_DEEPEP_BUFFER_SIZE_MB
   ACTOR_MOE_DISPATCHER NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN
   VLLM_DS4_DECODE_KERNEL VERL_FILE_LOGGER_PATH
 )
+if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
+  RAY_ENV_NAMES+=(VLLM_BATCH_INVARIANT_KERNEL_LIB DS4_BI_TOPK_LIB)
+fi
 RAY_RUNTIME_ENV=()
 for name in "${RAY_ENV_NAMES[@]}"; do
   RAY_RUNTIME_ENV+=(
@@ -330,9 +335,11 @@ fi
 if [[ "${DRY_RUN:-0}" != 1 ]]; then
   [[ "${DEEPEP_MAX_NVL_PEERS}" == "${NGPUS_PER_NODE}" ]] ||
     die "DEEPEP_MAX_NVL_PEERS must equal NGPUS_PER_NODE"
-  [[ -s "${VLLM_BATCH_INVARIANT_KERNEL_LIB}" ]] ||
-    die "missing batch-invariant kernel"
-  [[ -s "${DS4_BI_TOPK_LIB}" ]] || die "missing deterministic top-k kernel"
+  if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
+    [[ -s "${VLLM_BATCH_INVARIANT_KERNEL_LIB}" ]] ||
+      die "missing batch-invariant kernel"
+    [[ -s "${DS4_BI_TOPK_LIB}" ]] || die "missing deterministic top-k kernel"
+  fi
   IFS=, read -r -a train_files <<<"${TRAIN_FILES}"
   IFS=, read -r -a val_files <<<"${VAL_FILES}"
   for file in "${train_files[@]}"; do
@@ -415,15 +422,13 @@ HYDRA_ARGS=(
   +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_custom_all_reduce=True
   +actor_rollout_ref.rollout.engine_kwargs.vllm.worker_extension_cls="${VLLM_WORKER_EXTENSION}"
   +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8
-  +actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=deep_gemm
+  +actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend="${ROLLOUT_MOE_BACKEND}"
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.expert_dtype=fp8
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config.activation_scheme=dynamic
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config.fmt=e4m3
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config.quant_method=fp8
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config.scale_fmt=ue8m0
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config.weight_block_size='[128,128]'
-  +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config='{cudagraph_mode:FULL_DECODE_ONLY}'
-
   # Reward and trainer.
   reward.reward_manager.name=dapo
   +reward.reward_kwargs.overlong_buffer_cfg.enable=True

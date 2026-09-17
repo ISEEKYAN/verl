@@ -11,8 +11,8 @@ ARG TARGETARCH=amd64
 # baked into the image. VERL and Megatron-LM are mounted at run time.
 ARG VLLM_REPO=https://github.com/ISEEKYAN/vllm.git
 ARG VLLM_REF=refs/heads/ds4-v9-rc1
-ARG VLLM_REVISION=1a6542cdebbaabbf9972c358de8d6baa54e46b0c
-ARG VLLM_TREE=df12131335d84e9848e188905449230902eaf7ca
+ARG VLLM_REVISION=1912dfcd35bffd995b7845120ad8ad595be0ace3
+ARG VLLM_TREE=57f2312769117432f178be7dd29f1c38cbf8623c
 ARG VLLM_WHEEL_COMMIT=7aa248fcfef5ba7a6bfb0ce314e328ce63abb9f9
 ARG VLLM_WHEEL_VERSION=0.26.1rc1.dev682+g7aa248fcf
 ARG VLLM_WHEEL_URL_VERSION=0.26.1rc1.dev682%2Bg7aa248fcf
@@ -89,7 +89,7 @@ clone_exact() {
 
 git init /src/vllm
 git -C /src/vllm remote add origin "${VLLM_REPO}"
-git -C /src/vllm fetch --depth 256 origin "${VLLM_REF}"
+git -C /src/vllm fetch --depth 2048 origin "${VLLM_REF}"
 git -C /src/vllm checkout --detach "${VLLM_REVISION}"
 test "$(git -C /src/vllm rev-parse HEAD)" = "${VLLM_REVISION}"
 test "$(git -C /src/vllm rev-parse HEAD^{tree})" = "${VLLM_TREE}"
@@ -118,7 +118,7 @@ uv pip install PyYAML==6.0.3 pyarrow==25.0.1 datasets==5.0.1 \
   torchaudio==2.11.0 torchvision==0.28.0
 uv pip install -r /src/vllm/requirements/common.txt
 uv pip install --extra-index-url https://flashinfer.ai/whl/ \
-  flashinfer-python==0.6.16.post3 flashinfer-cubin==0.6.16.post3 \
+  flashinfer-python==0.6.18 flashinfer-cubin==0.6.18 \
   numba==0.65.0 "torchcodec>=0.14" PyNvVideoCodec==2.0.4 \
   apache-tvm-ffi==0.1.11 nvtx==0.2.15 "fastsafetensors>=0.3.3" \
   tokenspeed-mla==0.1.8 "humming-kernels[cu13]==0.1.12" \
@@ -180,11 +180,11 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${TORCH_CXX_FLAGS}")
 
 add_library(_vllm_batch_invariant_C SHARED
   /src/vllm/csrc/batch_invariant/fused_silu_mul_per_token_group_quant.cu
+  /src/vllm/csrc/batch_invariant/top_k.cu
   /src/vllm/csrc/batch_invariant/torch_bindings.cpp)
 target_include_directories(_vllm_batch_invariant_C PRIVATE /src/vllm/csrc)
-add_library(ds4_bi_topk SHARED /src/vllm/csrc/ds4_bi_topk_extension.cu)
 
-foreach(target _vllm_batch_invariant_C ds4_bi_topk)
+foreach(target _vllm_batch_invariant_C)
   target_link_libraries(${target} PRIVATE ${TORCH_LIBRARIES} Python3::Python)
   target_compile_options(${target} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O3>
@@ -269,8 +269,7 @@ EOF
 # -----------------------------------------------------------------------------
 RUN <<'EOF'
 set -eux
-for library in /opt/ds4/kernels/_vllm_batch_invariant_C.so \
-  /opt/ds4/kernels/ds4_bi_topk.so; do
+for library in /opt/ds4/kernels/_vllm_batch_invariant_C.so; do
   test -s "${library}"
   if ldd "${library}" | grep -Fq 'not found'; then exit 1; fi
 done
@@ -287,8 +286,7 @@ ARG VLLM_REVISION
 ENV VIRTUAL_ENV=/opt/ds4-venv \
     PATH=/opt/ds4-venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin \
     PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
-    VLLM_BATCH_INVARIANT_KERNEL_LIB=/opt/ds4/kernels/_vllm_batch_invariant_C.so \
-    DS4_BI_TOPK_LIB=/opt/ds4/kernels/ds4_bi_topk.so
+    VLLM_BATCH_INVARIANT_KERNEL_LIB=/opt/ds4/kernels/_vllm_batch_invariant_C.so
 RUN apt-get -o APT::Sandbox::User=root update && \
     apt-get -o APT::Sandbox::User=root install -y --no-install-recommends \
       rdma-core libibverbs1 binutils pciutils procps && \

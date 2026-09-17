@@ -26,7 +26,6 @@ PROJECT_NAME="${PROJECT_NAME:-verl-ds4-v4-preview}"
 ACTOR_OPTIMIZER="${ACTOR_OPTIMIZER:-dist_opt}"
 
 VLLM_BATCH_INVARIANT_KERNEL_LIB="${VLLM_BATCH_INVARIANT_KERNEL_LIB:-/opt/ds4/kernels/_vllm_batch_invariant_C.so}"
-DS4_BI_TOPK_LIB="${DS4_BI_TOPK_LIB:-/opt/ds4/kernels/ds4_bi_topk.so}"
 
 usage() {
   echo "usage: $0 --hardware {h100|gb200} --mode {quick_alignment_test|aligned|baseline-r3} [Hydra overrides...]"
@@ -103,7 +102,7 @@ case "${MODE}" in
     : "${OVERLONG_BUFFER_LEN:=4096}"
     : "${ROLLOUT_N:=8}"
     : "${MAX_RESPONSE_LENGTH:=8192}"
-    : "${ROLLOUT_MAX_NUM_SEQS:=32}"
+    : "${ROLLOUT_MAX_NUM_SEQS:=64}"
     : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.65}"
     ;;
   *)
@@ -134,7 +133,7 @@ if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
   export VLLM_BATCH_INVARIANT=1
   export VLLM_DS4_DECODE_KERNEL=sparse
   export VERL_FULL_DETERMINISM=1
-  export VLLM_BATCH_INVARIANT_KERNEL_LIB DS4_BI_TOPK_LIB
+  export VLLM_BATCH_INVARIANT_KERNEL_LIB
   MODE_ARGS=(
     actor_rollout_ref.actor.engine.impl=vllm
     +actor_rollout_ref.actor.engine.seed="${SEED}"
@@ -150,7 +149,7 @@ else
   export VLLM_BATCH_INVARIANT=0
   export VLLM_DS4_DECODE_KERNEL=paged
   export VERL_FULL_DETERMINISM=0
-  unset VLLM_BATCH_INVARIANT_KERNEL_LIB DS4_BI_TOPK_LIB
+  unset VLLM_BATCH_INVARIANT_KERNEL_LIB
   MODE_ARGS=(
     actor_rollout_ref.actor.engine.attention_backend_override=fused
     +actor_rollout_ref.actor.engine.impl_cfg.use_deepep=True
@@ -299,7 +298,7 @@ RAY_ENV_NAMES=(
   VLLM_DS4_DECODE_KERNEL VERL_FILE_LOGGER_PATH
 )
 if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
-  RAY_ENV_NAMES+=(VLLM_BATCH_INVARIANT_KERNEL_LIB DS4_BI_TOPK_LIB)
+  RAY_ENV_NAMES+=(VLLM_BATCH_INVARIANT_KERNEL_LIB)
 fi
 RAY_RUNTIME_ENV=()
 for name in "${RAY_ENV_NAMES[@]}"; do
@@ -337,7 +336,6 @@ if [[ "${DRY_RUN:-0}" != 1 ]]; then
   if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
     [[ -s "${VLLM_BATCH_INVARIANT_KERNEL_LIB}" ]] ||
       die "missing batch-invariant kernel"
-    [[ -s "${DS4_BI_TOPK_LIB}" ]] || die "missing deterministic top-k kernel"
   fi
   IFS=, read -r -a train_files <<<"${TRAIN_FILES}"
   IFS=, read -r -a val_files <<<"${VAL_FILES}"

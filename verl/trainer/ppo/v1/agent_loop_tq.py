@@ -16,6 +16,8 @@
 """TransferQueue adapter for AgentLoopManager and AgentLoopWorker"""
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 from typing import Any
@@ -47,6 +49,21 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 async def _settle_session_tasks(tasks: list[asyncio.Task[Any]]) -> list[BaseException]:
     results = await asyncio.gather(*tasks, return_exceptions=True)
     return [result for result in results if isinstance(result, BaseException)]
+
+
+def _session_sampling_params(params: dict, seed: int | None, trajectory: dict, session_id: int) -> dict:
+    params = dict(params)
+    if seed is not None and "seed" not in params:
+        identity = [
+            int(seed),
+            int(trajectory["step"]),
+            str(trajectory["sample_index"]),
+            bool(trajectory["validate"]),
+            int(session_id),
+        ]
+        digest = hashlib.sha256(json.dumps(identity).encode()).digest()
+        params["seed"] = int.from_bytes(digest[:8], "little") % (1 << 63)
+    return params
 
 
 @ray.remote
@@ -121,9 +138,12 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
             tasks = []
             for i in range(n):
+                session_params = _session_sampling_params(
+                    run_sampling_params, config.seed if config.full_determinism else None, trajectory, i
+                )
                 task = asyncio.create_task(
                     self._run_agent_loop(
-                        run_sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt
+                        session_params, trajectory=trajectory, trace=trace, session_id=i, **prompt
                     )
                 )
                 tasks.append(task)

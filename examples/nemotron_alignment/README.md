@@ -20,10 +20,36 @@ dynamic32. This is not a 128-unique-prompt/n8 rollout or full RL benchmark.
 
 ## 1. Get the image and exact checkpoint
 
-The artifact is a **Pyxis/Enroot squashfs image**, not a Docker Hub tag. It
-contains the native extensions, patched vLLM, a regular installed verl wheel
-and both Python check scripts under `/opt/nemotron-alignment`. No source
-overlay, editable installation, compilation or Ray cluster is needed.
+Docker Hub distribution (Linux ARM64):
+
+```bash
+docker pull aosheninferact/nemotron-alignment:full52-fsdp2-gb200-20260916-arm64
+```
+
+Published manifest digest (2026-09-16):
+`sha256:75accb441bca0a2b1cde2f917e0d0efdc66aea0faacf3e94aebf6b750448a6e2`.
+Anonymous registry access and the ARM64 config were verified. The converted
+image has not had a separate GPU rerun; the validation below used the original
+squashfs image.
+
+For the Slurm/Pyxis launcher below, import that image on a host with Enroot:
+
+```bash
+enroot import -o /shared/repro/nemotron-dockerhub.sqsh docker://aosheninferact/nemotron-alignment:full52-fsdp2-gb200-20260916-arm64
+export NEMOTRON_IMAGE=/shared/repro/nemotron-dockerhub.sqsh
+```
+
+The Docker image is flattened from the tested squashfs filesystem. It preserves
+the runtime code/native binaries, adds the current README/host launcher, and
+excludes host device contents, credentials, home directories and build/JIT caches.
+It does not contain model weights. Its image digest and reimported squashfs hash
+are different from the original squashfs SHA256 below; do not use that checksum
+to verify an Enroot reimport.
+
+Both formats contain the native extensions, patched vLLM, a regular installed
+verl wheel and Python checks under `/opt/nemotron-alignment`. No source overlay,
+editable installation, native compilation or Ray cluster is needed. Removing
+JIT caches means the first launch can still compile normal runtime kernels.
 
 Image on the experiment cluster:
 
@@ -45,8 +71,9 @@ SGD update**. Downloading the original Hugging Face checkpoint is not the
 same weight baseline. Copy the entire checkpoint directory, including all
 47 safetensor shards, index, config and tokenizer files.
 
-These paths are **not public download URLs**. On another cluster, obtain
-authorized file access or an artifact transfer from the owner. Example,
+The original squashfs/checkpoint paths are **not public download URLs**. The
+image is also available through Docker Hub above, but the exact checkpoint
+still needs authorized file access or transfer from the owner. Example,
 after creating your destination directories:
 
 ```bash
@@ -98,7 +125,8 @@ No privileged-container flag is required.
 Set paths for your cluster, then run these commands sequentially:
 
 ```bash
-export NEMOTRON_IMAGE=/shared/repro/nemotron-alignment-full52-ep4cp2pp2-20260916-arm64.sqsh
+# Use the imported Docker Hub image, or the original squashfs if transferred:
+export NEMOTRON_IMAGE=/shared/repro/nemotron-dockerhub.sqsh
 export NEMOTRON_MODEL_DIR=/shared/repro/model
 export NEMOTRON_RESULTS=/shared/repro/results/run-001
 export NEMOTRON_MASTER_ADDR=<first-node-ipv4>
@@ -150,7 +178,7 @@ Targeted vLLM tests:23 passed; visible-forward/native-VJP CPU contract:4 passed.
 
 The host launcher consolidates those tested commands. Its shell syntax and
 argument checks are verified; it has not had a separate full GPU rerun.
-The image's embedded README predates this launcher; this document is the
-current reproduction entrypoint. These are fork-review Draft PRs, not
+The original squashfs image's embedded README predates this launcher; this
+document is the current reproduction entrypoint. These are fork-review Draft PRs, not
 upstream-approved releases; the known verl copyright-header check remains
 to be resolved before upstreaming.

@@ -102,7 +102,7 @@ case "${MODE}" in
     : "${OVERLONG_BUFFER_LEN:=4096}"
     : "${ROLLOUT_N:=8}"
     : "${MAX_RESPONSE_LENGTH:=8192}"
-    : "${ROLLOUT_MAX_NUM_SEQS:=64}"
+    : "${ROLLOUT_MAX_NUM_SEQS:=128}"
     : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.65}"
     ;;
   *)

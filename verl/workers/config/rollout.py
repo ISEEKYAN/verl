@@ -185,6 +185,7 @@ class RolloutConfig(BaseConfig):
     gpu_memory_utilization: float = 0.5
     standalone_gpu_memory_utilization: Optional[float] = None
     ignore_eos: bool = False
+    stop: Optional[list[str]] = None
     enforce_eager: bool = False
     cudagraph_capture_sizes: Optional[list] = None
     free_cache_engine: bool = True

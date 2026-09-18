@@ -1748,7 +1748,9 @@ class PPOTrainer(ABC):
 
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
         output = rename_dict(output["metrics"], "actor/")
-        output["perf/mfu/actor"] = output.pop("actor/mfu")
+        actor_mfu = output.pop("actor/mfu", None)
+        if actor_mfu is not None:
+            output["perf/mfu/actor"] = actor_mfu
         actor_metrics = reduce_metrics(output)
         metrics.update(actor_metrics)
 

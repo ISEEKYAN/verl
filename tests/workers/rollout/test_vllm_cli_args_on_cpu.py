@@ -212,5 +212,36 @@ class TestVllmColocateZmqHandle:
         assert handle == "ipc:///tmp/rl-colocate-zmq-job-123-replica-2-rank-3.sock"
 
 
+@pytest.mark.parametrize(
+    "configured,request_params,expected",
+    [(None, {}, None), (["\nQuestion:"], {}, ["\nQuestion:"]),
+     (["\nQuestion:"], {"stop": ["END"]}, ["END"])],
+)
+def test_rollout_stop_strings_reach_sampling_params(monkeypatch, configured, request_params, expected):
+    """Preserve the evaluation stop rule without overriding per-request choices."""
+    import asyncio
+
+    from verl.workers.config import RolloutConfig
+    from verl.workers.rollout.vllm_rollout import vllm_async_server
+
+    captured = {}
+
+    class SamplingCaptured(Exception):
+        pass
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        raise SamplingCaptured
+
+    monkeypatch.setattr(vllm_async_server, "SamplingParams", capture)
+    server = SimpleNamespace(
+        _disaggregation_role=None,
+        config=RolloutConfig(name="vllm", max_model_len=128, stop=configured),
+    )
+    with pytest.raises(SamplingCaptured):
+        asyncio.run(vllm_async_server.vLLMHttpServer.generate(server, [1], request_params, "test-stop"))
+    assert captured.get("stop") == expected
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

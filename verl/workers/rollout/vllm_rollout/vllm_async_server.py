@@ -602,6 +602,8 @@ class vLLMHttpServer:
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
+        if self.config.get("stop") is not None:
+            sampling_params.setdefault("stop", list(self.config.stop))
         # Inject per-request seed for deterministic sampling when full_determinism is enabled.
         if self.config.full_determinism:
             sampling_params.setdefault("seed", self.replica_rank + self.config.seed)

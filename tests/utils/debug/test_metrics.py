@@ -12,6 +12,7 @@
 # limitations under the License.
 
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -20,6 +21,22 @@ from verl.utils.debug.metrics import calculate_debug_metrics
 
 
 class TestMetrics(unittest.TestCase):
+    def test_raw_logprob_gate_rejects_probability_underflow_and_empty_masks(self):
+        data = DataProto.from_dict({
+            "rollout_log_probs": torch.tensor([[-1000.0, -1000.0]]),
+            "old_log_probs": torch.tensor([[-1000.0, -1001.0]]),
+            "response_mask": torch.ones((1, 2)),
+            "responses": torch.zeros((1, 2)),
+        })
+        with patch.dict("os.environ", {"VERL_REQUIRE_BITWISE_LOGPROBS": "1"}):
+            with self.assertRaisesRegex(RuntimeError, "bitwise mismatch"):
+                calculate_debug_metrics(data)
+            data.batch["old_log_probs"] = data.batch["rollout_log_probs"].clone()
+            self.assertEqual(calculate_debug_metrics(data)["training/raw_logprobs_bitwise_equal"], 1)
+            data.batch["response_mask"].zero_()
+            with self.assertRaisesRegex(RuntimeError, "nonempty finite"):
+                calculate_debug_metrics(data)
+
     def test_calculate_debug_metrics(self):
         data = DataProto.from_dict(
             {

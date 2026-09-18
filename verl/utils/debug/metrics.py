@@ -12,6 +12,7 @@
 # limitations under the License.
 
 import logging
+import os
 
 import torch
 
@@ -98,6 +99,17 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     actor_probs = torch.exp(actor_old_log_probs)
     rollout_probs = torch.exp(rollout_old_log_probs)
     response_mask_bool = response_mask.bool()
+    exact_metrics = {}
+    if os.environ.get("VERL_REQUIRE_BITWISE_LOGPROBS") == "1":
+        actor = actor_old_log_probs.masked_select(response_mask_bool).contiguous()
+        rollout = rollout_old_log_probs.masked_select(response_mask_bool).contiguous()
+        if actor.numel() == 0 or not (actor.isfinite().all() and rollout.isfinite().all()):
+            raise RuntimeError("Raw logprob gate requires nonempty finite response logprobs")
+        if actor.dtype != rollout.dtype or not torch.equal(actor.view(torch.uint8), rollout.view(torch.uint8)):
+            raise RuntimeError(
+                f"Raw logprob bitwise mismatch: max_abs={(actor - rollout).abs().max().item()}"
+            )
+        exact_metrics = {"training/raw_logprobs_bitwise_equal": 1, "training/raw_logprobs_tokens": actor.numel()}
 
     # check if there are any valid tokens before computing metrics
     if not response_mask_bool.any():
@@ -113,6 +125,7 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
     rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
     return {
+        **exact_metrics,
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).detach().item(),

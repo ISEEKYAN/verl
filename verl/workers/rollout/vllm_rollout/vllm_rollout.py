@@ -26,6 +26,7 @@ When working with Megatron:
 - After inference, all the parameters that doesn't belong to this pp rank is freed.
 """
 
+import asyncio
 import logging
 import os
 import time
@@ -231,10 +232,16 @@ class ServerAdapter(BaseRollout):
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
         )
-        await sender.async_send_weights(weights)
-
-        if future is not None:
-            await future
+        send_task = asyncio.create_task(sender.async_send_weights(weights))
+        try:
+            if future is None:
+                await send_task
+            else:
+                await asyncio.gather(send_task, future)
+        finally:
+            if not send_task.done():
+                send_task.cancel()
+                await asyncio.gather(send_task, return_exceptions=True)
 
         # reset caches after updating weights
         if self._has_server:

@@ -14,7 +14,29 @@
 
 import asyncio
 
-from verl.trainer.ppo.v1.agent_loop_tq import _settle_session_tasks
+from verl.trainer.ppo.v1.agent_loop_tq import _session_sampling_params, _settle_session_tasks
+
+
+def test_session_seeds_are_reproducible_without_collapsing_grpo_siblings():
+    params = {"temperature": 1.0}
+    trajectory = {"step": 1, "sample_index": 42, "validate": False}
+    seeds = [_session_sampling_params(params, 7, trajectory, i)["seed"] for i in range(8)]
+    replay = [_session_sampling_params(params, 7, trajectory, i)["seed"] for i in reversed(range(8))]
+    assert seeds == replay[::-1]
+    assert len(set(seeds)) == 8
+    assert all(0 <= seed < (1 << 63) for seed in seeds)
+    assert params == {"temperature": 1.0}
+    for field, value in (("step", 2), ("sample_index", 43), ("validate", True)):
+        assert _session_sampling_params(params, 7, {**trajectory, field: value}, 0)["seed"] != seeds[0]
+    assert _session_sampling_params(params, 8, trajectory, 0)["seed"] != seeds[0]
+
+
+def test_session_seeds_preserve_explicit_seeds_and_nondeterministic_sampling():
+    trajectory = {"step": 1, "sample_index": 42, "validate": False}
+    for seed in (None, 123):
+        params = {"seed": seed, "temperature": 1.0}
+        assert _session_sampling_params(params, 7, trajectory, 0) == params
+    assert _session_sampling_params({"temperature": 1.0}, None, trajectory, 0) == {"temperature": 1.0}
 
 
 def test_settle_session_tasks_waits_for_siblings_after_failure():

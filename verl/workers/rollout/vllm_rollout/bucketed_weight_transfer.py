@@ -169,6 +169,8 @@ class BucketedWeightSender:
             except OSError:
                 pass
         self.socket = self.zmq_context.socket(zmq.REQ)
+        timeout_ms = int(os.environ.get("VERL_WEIGHT_SYNC_TIMEOUT_S", "120")) * 1000
+        self.socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
         self.socket.bind(self.zmq_handle)
 
     def _init_buffer(self):
@@ -292,7 +294,11 @@ class BucketedWeightReceiver:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
                 is_last = metadata["is_last"]
-                on_bucket_received(weights, is_last)
+                try:
+                    on_bucket_received(weights, is_last)
+                except Exception:
+                    logger.exception("Weight update callback failed")
+                    raise
                 get_torch_device().synchronize()
                 self.socket.send(b"")
                 del weights, tensor

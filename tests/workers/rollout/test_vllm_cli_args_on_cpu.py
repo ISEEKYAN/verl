@@ -55,17 +55,35 @@ class TestBuildCliArgsFromConfig:
         result = build_cli_args_from_config(config)
         assert result == ["--enable-prefix-caching"]
 
-    def test_bool_false(self):
-        """Bool False is skipped entirely."""
-        config = {"enable-prefix-caching": False}
+    @pytest.mark.parametrize(
+        "key,expected",
+        [
+            ("enable-prefix-caching", ["--no-enable-prefix-caching"]),
+            ("enable_prefix_caching", ["--no-enable_prefix_caching"]),
+            ("enforce_eager", []),
+            ("hf_token", []),
+            ("disable-log-requests", []),
+        ],
+    )
+    def test_bool_false(self, key, expected):
+        """Explicit False must survive defaults without inventing unsupported flags."""
+        config = {key: False}
         result = build_cli_args_from_config(config)
-        assert result == []
+        assert result == expected
 
     def test_none_value(self):
         """None values are skipped."""
         config = {"lora-path": None}
         result = build_cli_args_from_config(config)
         assert result == []
+
+    def test_disabled_prefix_cache_survives_engine_parser(self):
+        from vllm.engine.arg_utils import AsyncEngineArgs
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+        parser = AsyncEngineArgs.add_cli_args(FlexibleArgumentParser())
+        args = parser.parse_args(build_cli_args_from_config({"enable_prefix_caching": False}))
+        assert AsyncEngineArgs.from_cli_args(args).enable_prefix_caching is False
 
     def test_list_values(self):
         """List values are expanded into multiple arguments."""
@@ -192,6 +210,37 @@ class TestVllmColocateZmqHandle:
         handle = vLLMColocateWorkerExtension._get_zmq_handle(worker)
 
         assert handle == "ipc:///tmp/rl-colocate-zmq-job-123-replica-2-rank-3.sock"
+
+
+@pytest.mark.parametrize(
+    "configured,request_params,expected",
+    [(None, {}, None), (["\nQuestion:"], {}, ["\nQuestion:"]),
+     (["\nQuestion:"], {"stop": ["END"]}, ["END"])],
+)
+def test_rollout_stop_strings_reach_sampling_params(monkeypatch, configured, request_params, expected):
+    """Preserve the evaluation stop rule without overriding per-request choices."""
+    import asyncio
+
+    from verl.workers.config import RolloutConfig
+    from verl.workers.rollout.vllm_rollout import vllm_async_server
+
+    captured = {}
+
+    class SamplingCaptured(Exception):
+        pass
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        raise SamplingCaptured
+
+    monkeypatch.setattr(vllm_async_server, "SamplingParams", capture)
+    server = SimpleNamespace(
+        _disaggregation_role=None,
+        config=RolloutConfig(name="vllm", max_model_len=128, stop=configured),
+    )
+    with pytest.raises(SamplingCaptured):
+        asyncio.run(vllm_async_server.vLLMHttpServer.generate(server, [1], request_params, "test-stop"))
+    assert captured.get("stop") == expected
 
 
 if __name__ == "__main__":

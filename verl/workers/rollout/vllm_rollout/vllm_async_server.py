@@ -370,10 +370,13 @@ class vLLMHttpServer:
             dp_args = {
                 "data_parallel_size": self.config.data_parallel_size,
                 "data_parallel_size_local": data_parallel_size_local,
-                "data_parallel_start_rank": self.node_rank * data_parallel_size_local,
                 "data_parallel_address": self._master_address,
                 "data_parallel_rpc_port": self._dp_rpc_port,
             }
+            # On the API node, an explicit start rank selects hybrid LB in vLLM.
+            # Our remote nodes are headless, so retain centralized/internal LB.
+            if self.node_rank > 0:
+                dp_args["data_parallel_start_rank"] = self.node_rank * data_parallel_size_local
             args.update(dp_args)
 
         args.update({"enable_expert_parallel": self.config.expert_parallel_size > 1})
@@ -599,6 +602,8 @@ class vLLMHttpServer:
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
+        if self.config.get("stop") is not None:
+            sampling_params.setdefault("stop", list(self.config.stop))
         # Inject per-request seed for deterministic sampling when full_determinism is enabled.
         if self.config.full_determinism:
             sampling_params.setdefault("seed", self.replica_rank + self.config.seed)

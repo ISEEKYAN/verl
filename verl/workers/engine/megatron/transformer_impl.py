@@ -680,6 +680,14 @@ class MegatronEngine(BaseEngine):
         """
         Zero out gradients of all parameters before starting a new backward pass.
         """
+        if self.optimizer_config.override_optimizer_config.get("chunked_optimizer_state_offload", False):
+            if self.is_optimizer_offload_enabled:
+                raise ValueError("Use MCore state offload without verl optimizer_offload")
+            if getattr(self.tf_config, "reuse_grad_buf_for_mxfp8_param_ag", False):
+                raise ValueError("State offload with MXFP8 parameter-buffer reuse needs separate lifecycle handling")
+            if self.optimizer.optimizer_state_offload_requires_pre_forward_param_sync():
+                raise ValueError("State offload with deferred parameter sync is not supported here")
+            self.optimizer.offload_optimizer_state_for_forward()
         self.optimizer.zero_grad()
         # use use_contiguous_buffers_in_local_ddp and no overlap_dp_param_comm
         for chunk in self.module:
@@ -693,6 +701,15 @@ class MegatronEngine(BaseEngine):
         Returns:
             grad_norm (float): The norm of the gradients before clipping or update.
         """
+        if self.optimizer_config.override_optimizer_config.get("chunked_optimizer_state_offload", False):
+            from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+
+            # Backward is finished; free cached FP8 weights before restoring optimizer master weights.
+            for chunk in self.module:
+                for module in chunk.modules():
+                    if isinstance(module, TransformerEngineBaseModule):
+                        module._fp8_workspaces.clear()
+            get_torch_device().empty_cache()
         # forward_kl_topk leaves large fp32 vocab tensors until backward ends;
         # free cached blocks before grad-norm all_reduce to reduce OOM on tight VRAM.
         if getattr(self, "_distillation_use_topk_active", False):

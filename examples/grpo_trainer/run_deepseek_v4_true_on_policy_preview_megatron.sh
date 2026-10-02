@@ -110,7 +110,7 @@ case "${MODE}" in
     : "${ROLLOUT_N:=8}"
     : "${MAX_RESPONSE_LENGTH:=14000}"
     : "${ROLLOUT_MAX_NUM_SEQS:=128}"
-    : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=$([[ "${MODE}" == baseline-r3 ]] && echo 0.60 || echo 0.65)}"
+    : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.65}"
     : "${PPO_MAX_TOKEN_LEN_PER_GPU:=4096}"
     : "${SAVE_FREQ:=5}"
     : "${TEST_FREQ:=10}"
@@ -169,7 +169,6 @@ else
     actor_rollout_ref.actor.megatron.router_replay.mode=R3
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
     +actor_rollout_ref.rollout.engine_kwargs.vllm.all2all_backend=flashinfer_nvlink_one_sided
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_flashinfer_autotune=True
   )
   export VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD="${VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD:-64}"
   export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}"
@@ -471,7 +470,6 @@ HYDRA_ARGS=(
   actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}"
   actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}"
   actor_rollout_ref.rollout.max_num_batched_tokens="${ROLLOUT_MAX_NUM_BATCHED_TOKENS}"
-  actor_rollout_ref.rollout.cudagraph_capture_sizes=null
   actor_rollout_ref.rollout.enable_chunked_prefill=True
   actor_rollout_ref.rollout.temperature=1.0
   actor_rollout_ref.rollout.top_p=1.0

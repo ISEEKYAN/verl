@@ -5,7 +5,10 @@
 # Modes: quick_alignment_test (1x4, four layers, two steps), aligned,
 #        baseline-r3.
 # Hardware: h100 (8x8, PP4/CP2/EP16, rollout EP16);
-#           gb200 (8x4, PP1/CP2/EP32, rollout EP8).
+#           gb200 (8x4, PP1/CP4/EP32, rollout DP8/EP8).
+# GB200 full modes follow the 100-step run; baseline needs the verified
+# BF16-combine FlashInfer one-sided adapter and verl optimizer lifecycle fix.
+# VAL_FILES should point to the AIME validation parquet for that comparison.
 # Images build on `Dockerfile.dsv4_true_on_policy_preview`:
 #   docker://iseekyan/verl:ds4_vllm_align.preview-arm64
 #   docker://iseekyan/verl:ds4_vllm_align.preview-amd64
@@ -95,17 +98,22 @@ case "${MODE}" in
     : "${MAX_RESPONSE_LENGTH:=2048}"
     : "${ROLLOUT_MAX_NUM_SEQS:=4}"
     : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.55}"
+    : "${SAVE_FREQ:=-1}"
+    : "${TEST_FREQ:=-1}"
     ;;
   aligned|baseline-r3)
     [[ "${MODE}" == aligned ]] && EXACT_ALIGNMENT=1 || EXACT_ALIGNMENT=0
-    : "${TOTAL_TRAINING_STEPS:=20}"
+    : "${TOTAL_TRAINING_STEPS:=100}"
     : "${TRAIN_BATCH_SIZE:=128}"
     : "${PPO_MINI_BATCH_SIZE:=32}"
     : "${OVERLONG_BUFFER_LEN:=4096}"
     : "${ROLLOUT_N:=8}"
-    : "${MAX_RESPONSE_LENGTH:=8192}"
-    : "${ROLLOUT_MAX_NUM_SEQS:=64}"
-    : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.65}"
+    : "${MAX_RESPONSE_LENGTH:=14000}"
+    : "${ROLLOUT_MAX_NUM_SEQS:=128}"
+    : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=$([[ "${MODE}" == baseline-r3 ]] && echo 0.60 || echo 0.65)}"
+    : "${PPO_MAX_TOKEN_LEN_PER_GPU:=4096}"
+    : "${SAVE_FREQ:=5}"
+    : "${TEST_FREQ:=10}"
     ;;
   *)
     die "unknown mode '${MODE}'"
@@ -160,8 +168,11 @@ else
   MODE_ARGS=(
     actor_rollout_ref.actor.megatron.router_replay.mode=R3
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.all2all_backend=flashinfer_nvlink_two_sided
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.all2all_backend=flashinfer_nvlink_one_sided
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_flashinfer_autotune=True
   )
+  export VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD="${VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD:-64}"
+  export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}"
 fi
 
 OPTIMIZER_ARGS=(
@@ -204,13 +215,20 @@ else
       : "${NNODES:=8}"
       : "${NGPUS_PER_NODE:=4}"
       : "${ACTOR_PP:=1}"
-      : "${ACTOR_CP:=2}"
+      : "${ACTOR_CP:=4}"
       : "${ACTOR_EP:=32}"
       : "${ROLLOUT_DP:=8}"
       : "${ROLLOUT_EP:=8}"
       : "${ROLLOUT_AGENT_WORKERS:=32}"
       ;;
   esac
+fi
+
+if [[ "${HARDWARE}" == gb200 ]]; then
+  export NCCL_MNNVL_ENABLE="${NCCL_MNNVL_ENABLE:-1}"
+  if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
+    export VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL="${VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL:-1}"
+  fi
 fi
 
 runtime_config_root="$(mktemp -d /tmp/ds4-v4-preview-config.XXXXXX)"
@@ -269,9 +287,15 @@ if [[ "${MODE}" == baseline-r3 ]]; then
     actor_rollout_ref.actor.megatron.context_parallel_size="${ACTOR_CP}"
     actor_rollout_ref.actor.megatron.expert_model_parallel_size="${ACTOR_EP}"
     actor_rollout_ref.actor.megatron.param_offload=False
+    actor_rollout_ref.actor.megatron.optimizer_offload=False
+    +actor_rollout_ref.actor.optim.override_optimizer_config.chunked_optimizer_state_offload=True
+    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_state_offload_chunk_size_mb=1024
     ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8=e4m3
     ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8_recipe=mxfp8
     ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_loss_coeff=0.0
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
   )
   if (( ACTOR_CP > 1 )); then
     ACTOR_ARGS+=(
@@ -359,7 +383,9 @@ if (( NNODES > 1 )); then
 fi
 
 for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL \
-  VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL NCCL_MNNVL_ENABLE; do
+  VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL NCCL_MNNVL_ENABLE NCCL_NVLS_ENABLE \
+  VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR \
+  MLITE_DCP_LOCAL_STAGE_DIR DS4_CHECKPOINT_STAGE_DIR DS4_MCORE_LOCAL_STAGE; do
   if [[ -v "${name}" ]]; then
     RAY_RUNTIME_ENV+=(
       "+ray_kwargs.ray_init.runtime_env.env_vars.${name}=\"${!name}\""
@@ -400,6 +426,7 @@ HYDRA_ARGS=(
   data.train_files="${TRAIN_FILES}"
   data.val_files="${VAL_FILES}"
   data.train_batch_size="${TRAIN_BATCH_SIZE}"
+  data.seed="${SEED}"
   data.max_prompt_length="${MAX_PROMPT_LENGTH}"
   data.max_response_length="${MAX_RESPONSE_LENGTH}"
   data.prompt_key=prompt
@@ -420,7 +447,7 @@ HYDRA_ARGS=(
   actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}"
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
   actor_rollout_ref.actor.use_dynamic_bsz=True
-  actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${MAX_MODEL_LEN}"
+  actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${PPO_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN}}"
   actor_rollout_ref.actor.use_kl_loss=False
   actor_rollout_ref.actor.kl_loss_coef=0.0
   actor_rollout_ref.actor.entropy_coeff=0
@@ -444,6 +471,7 @@ HYDRA_ARGS=(
   actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}"
   actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}"
   actor_rollout_ref.rollout.max_num_batched_tokens="${ROLLOUT_MAX_NUM_BATCHED_TOKENS}"
+  actor_rollout_ref.rollout.cudagraph_capture_sizes=null
   actor_rollout_ref.rollout.enable_chunked_prefill=True
   actor_rollout_ref.rollout.temperature=1.0
   actor_rollout_ref.rollout.top_p=1.0
@@ -472,6 +500,9 @@ HYDRA_ARGS=(
   trainer.n_gpus_per_node="${NGPUS_PER_NODE}"
   trainer.nnodes="${NNODES}"
   trainer.total_training_steps="${TOTAL_TRAINING_STEPS}"
+  trainer.save_freq="${SAVE_FREQ}"
+  trainer.test_freq="${TEST_FREQ}"
+  trainer.max_actor_ckpt_to_keep=2
   trainer.default_local_dir="${CKPT_DIR}"
   trainer.val_before_train=False
   trainer.use_v1=False

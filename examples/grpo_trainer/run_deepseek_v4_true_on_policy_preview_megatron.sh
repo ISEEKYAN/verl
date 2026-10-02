@@ -270,7 +270,6 @@ ACTOR_ARGS=(
   actor_rollout_ref.actor.engine.ep="${ACTOR_EP}"
   '~actor_rollout_ref.actor.engine.grad_offload'
   '~actor_rollout_ref.ref.engine.grad_offload'
-  actor_rollout_ref.actor.engine.load_hf_weights=True
   +actor_rollout_ref.actor.engine.cross_entropy_fusion=True
   actor_rollout_ref.actor.engine.resync_format=block_fp8
   +actor_rollout_ref.actor.engine.resync_config.expert_dtype=fp8
@@ -291,7 +290,6 @@ if [[ "${MODE}" == baseline-r3 ]]; then
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_state_offload_chunk_size_mb=1024
     ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8=e4m3
     ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8_recipe=mxfp8
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_loss_coeff=0.0
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
@@ -419,7 +417,6 @@ fi
 HYDRA_ARGS=(
   # Algorithm and data.
   algorithm.adv_estimator=grpo
-  algorithm.use_kl_in_reward=False
   algorithm.kl_ctrl.kl_coef=0.0
   algorithm.norm_adv_by_std_in_grpo=False
   data.train_files="${TRAIN_FILES}"
@@ -428,10 +425,6 @@ HYDRA_ARGS=(
   data.seed="${SEED}"
   data.max_prompt_length="${MAX_PROMPT_LENGTH}"
   data.max_response_length="${MAX_RESPONSE_LENGTH}"
-  data.prompt_key=prompt
-  data.return_raw_chat=True
-  data.filter_overlong_prompts=False
-  data.truncation=error
   +data.apply_chat_template_kwargs.enable_thinking=True
 
   # Model and shared actor settings.
@@ -442,16 +435,11 @@ HYDRA_ARGS=(
   actor_rollout_ref.actor.optim.betas='[0.9,0.95]'
   actor_rollout_ref.actor.optim.lr="${ACTOR_LR}"
   actor_rollout_ref.actor.optim.lr_warmup_steps=0
-  actor_rollout_ref.actor.optim.clip_grad=1.0
   actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}"
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
   actor_rollout_ref.actor.use_dynamic_bsz=True
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${PPO_MAX_TOKEN_LEN_PER_GPU:-${MAX_MODEL_LEN}}"
-  actor_rollout_ref.actor.use_kl_loss=False
   actor_rollout_ref.actor.kl_loss_coef=0.0
-  actor_rollout_ref.actor.entropy_coeff=0
-  actor_rollout_ref.actor.loss_agg_mode=token-mean
-  actor_rollout_ref.actor.clip_ratio_low=0.2
   actor_rollout_ref.actor.clip_ratio_high=0.28
   actor_rollout_ref.actor.clip_ratio_c=10.0
 
@@ -464,16 +452,11 @@ HYDRA_ARGS=(
   actor_rollout_ref.rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEMORY_UTILIZATION}"
   actor_rollout_ref.rollout.n="${ROLLOUT_N}"
   actor_rollout_ref.rollout.calculate_log_probs=True
-  actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
   actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${MAX_MODEL_LEN}"
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
   actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}"
   actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}"
   actor_rollout_ref.rollout.max_num_batched_tokens="${ROLLOUT_MAX_NUM_BATCHED_TOKENS}"
-  actor_rollout_ref.rollout.enable_chunked_prefill=True
-  actor_rollout_ref.rollout.temperature=1.0
-  actor_rollout_ref.rollout.top_p=1.0
-  actor_rollout_ref.rollout.top_k=-1
   actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
   +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_custom_all_reduce=True
   +actor_rollout_ref.rollout.engine_kwargs.vllm.worker_extension_cls="${VLLM_WORKER_EXTENSION}"

@@ -38,7 +38,7 @@ verl-core = [
     "codetiming",
     "datasets",
     "dill",
-    "hydra-core",
+    "hydra-core>=1.3.4,<1.4",
     "numpy>=2.0.0",
     "pandas",
     "peft",
@@ -95,9 +95,9 @@ vllm = [
     "vllm==0.29.0",
     # flashinfer is a transitive dep vllm 0.29 hard-pins to ==0.6.18 (pure-python
     # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
-    # vllm 0.29 needs transformers>=5.10.4; 5.12.1 is the project-wide pin
+    # vllm 0.29 needs transformers>=5.10.4; 5.15.0 is the project-wide pin
     # (enforced in override-dependencies below).
-    "transformers==5.12.1",
+    "transformers==5.15.0",
 ]
 
 sglang = [
@@ -114,9 +114,9 @@ sglang = [
     # sglang hard-deps flash-attn-4 but we EXCLUDE it (it collides with the
     # flash-attn 2.8.3 the training extras pin — see override-dependencies); it is
     # imported lazily (fa4 backend only), so the default backends work.
-    # sglang 0.5.20 hard-pins transformers==5.12.1, which is also the project-wide
-    # override below.
-    "transformers==5.12.1",
+    # Bridge 0.8 needs >=5.15. The shared override supersedes sglang's
+    # upstream 5.12.1 pin; combined inference acceptance remains a release gate.
+    "transformers==5.15.0",
 ]
 
 # DEFERRED — trtllm is a CUDA-13 backend (torch 2.10.0+cu130, conflict-gated).
@@ -144,12 +144,11 @@ fsdp = [
     "trl==0.27.0",
     "flash-linear-attention==0.5.2",
     # transformers NOT pinned here: verl-core carries it and the project-wide
-    # override below settles the version (5.12.1). See override-dependencies.
+    # override below settles the version (5.15.0). See override-dependencies.
 ]
 
-# apex / TE / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
-# megatron-core is git-sourced (built at sync time). onnxscript: works around an
-# undeclared TE import.
+# Apex and FlashAttention use prebuilt wheels. Core, Bridge and TE use fixed
+# source snapshots; TE needs the CUDA toolkit and build tools at sync time.
 megatron = [
     "verl[verl-core]",
     "verl[flash-attn-cu130torch213]",
@@ -161,12 +160,12 @@ megatron = [
     "apex",
     "transformer-engine",
     "onnxscript",
+    "setuptools>=80", "wheel", "cmake", "ninja", "pybind11",
     "trl==0.27.0",
     "matplotlib",
     "liger-kernel==0.8.4",
-    # Megatron-Bridge is imported as megatron.bridge and installed deps-free — see
-    # [[tool.uv.dependency-metadata]] below. The wheelhouse builds tag v0.6.2.
-    "megatron-bridge==0.6.2",
+    # Bridge runtime dependencies are curated below, excluding training services.
+    "megatron-bridge==0.8.0",
     "megatron-core",
     # Qwen3.5 Gated DeltaNet kernels; Bridge's dependencies are disabled below.
     "flash-linear-attention==0.5.2",
@@ -174,8 +173,8 @@ megatron = [
     # and bridge is installed deps-free, so it has to be listed here.
     "megatron-energon==7.4.1",
     # megatron-bridge hard-imports modelopt but is installed deps-free (below), so
-    # megatron needs it explicitly. 0.44.0: PyPI stable of bridge r0.5.0's 0.44.x.
-    "nvidia-modelopt==0.44.0",
+    # megatron needs it explicitly. Match the selected Bridge snapshot.
+    "nvidia-modelopt==0.48.0rc1",
     # transformers NOT pinned here (see fsdp note): settled via override-deps below.
 ]
 
@@ -191,7 +190,7 @@ megatron = [
 # [[tool.uv.dependency-metadata]] below): its real metadata pins
 # datasets<=2.21.0, which would downgrade the shared datasets dependency. Some
 # VeOmni-generated models additionally need an on-the-fly Transformers overlay
-# (`uv run --with transformers==5.16.1`); the locked 5.12.1 covers the Qwen / GPT-OSS
+# (`uv run --with transformers==5.16.1`); the locked 5.15.0 covers the Qwen / GPT-OSS
 # models the examples use.
 veomni = [
     "verl[verl-core]",
@@ -249,7 +248,7 @@ cpu = [
     "torch==2.13.0",
     "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    "transformers==5.12.1",
+    "transformers==5.15.0",
     # Plain source package (torch / numpy / packaging + one pybind11 C++ ext, no
     # CUDA toolchain), and it imports without TE / apex — both are optional there
     # with pure-torch fallbacks. It is what lets the `*_on_cpu.py` tests that
@@ -342,6 +341,10 @@ verl = [
 # One universal uv.lock: `uv lock` resolves every extra; conflicting extras
 # coexist in the lock but never in one venv. See docs/start/install.rst.
 [tool.uv]
+# TE source builds against the selected runtime Torch/CUDA, as in Bridge.
+no-build-isolation-package = ["transformer-engine"]
+# Keep implicit/build-time Torch requirements in the same version world.
+constraint-dependencies = ["torch==2.13.0"]
 # Linux + Python 3.12 on both CPU arches verl ships CUDA images for: x86_64 and
 # aarch64 (GH200 / GB200 superchips).
 #
@@ -354,12 +357,10 @@ verl = [
 # That works because everything the cu130 backends need is published for both:
 # torch / torchvision / torchaudio cu130 (download.pytorch.org ships
 # manylinux_2_28_aarch64), vllm / sglang / sglang-kernel / cupy-cuda13x /
-# sglang-router (PyPI), and the three native wheelhouse builds apex /
-# flash-attn / transformer-engine (the wheelhouse builds those on
-# ubuntu-24.04-arm with TORCH_CUDA_ARCH_LIST "9.0;10.0" — the only CUDA parts an
-# arm64 wheel can land on). megatron-bridge is py3-none-any; megatron-core
-# builds from git. The second entry costs one extra package (sglang's
-# aarch64-only decord2) and leaves every pinned version unchanged.
+# sglang-router (PyPI), plus wheelhouse builds of Apex and FlashAttention.
+# Core and Bridge build from fixed git revisions. TE also builds from source,
+# with CUDA/Torch available, until matching wheels are published.
+# The second architecture adds sglang's aarch64-only decord2.
 #
 # If a package ever IS arch-specific, do NOT fork the backend into
 # `megatron-x86_64` / `megatron-aarch64` extras — that doubles the conflict
@@ -393,12 +394,12 @@ conflicts = [
 ]
 
 # Global override pins:
-#   * transformers==5.12.1 project-wide — one version for every backend, so a
+#   * transformers==5.15.0 project-wide — one version for every backend, so a
 #     venv's transformers no longer depends on which engine it was synced with.
 #     Unmarked on purpose: overrides are absolute and replace EVERY requirement
 #     on the package, so this also settles the engines' own pins (vllm 0.29 asks
-#     >=5.10.4, sglang 0.5.20 hard-pins ==5.12.1). Keep it inside setup.py /
-#     requirements.txt's supported window (>=5.5.3,!=5.6.0,<5.13) and bump all
+#     >=5.10.4, sglang 0.5.20 hard-pins ==5.12.1; overridden for Bridge 0.8). Keep it inside setup.py /
+#     requirements.txt's supported window (>=5.15,<5.21) and bump all
 #     of them together. Do NOT add
 #     an `extra` marker back unless a backend truly needs to diverge: such a
 #     marker matches only a requirement verl declares under that extra, never a
@@ -420,7 +421,7 @@ conflicts = [
 #     `pip uninstall -y flash-attn-4`; sglang itself only imports fa4 for its
 #     non-default "fa4" attention backend.
 override-dependencies = [
-    "transformers==5.12.1",
+    "transformers==5.15.0",
     "numpy>=2.0.0",
     "kernels>=0.14.1,<0.15",
     "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
@@ -439,23 +440,47 @@ override-dependencies = [
 
 # Skip lock-time metadata builds for git-source packages with no [project] /
 # dynamic version (the sync-time source build still runs). Versions track
-# [tool.uv.sources] below; bump together. (Wheelhouse packages read metadata from
-# the wheel — no entry needed, except megatron-bridge, whose wheel metadata we
-# deliberately discard; see below.)
+# [tool.uv.sources] below; bump together. Static wheel metadata also avoids
+# downloading complete CUDA wheels solely to resolve their requirements.
 [[tool.uv.dependency-metadata]]
 name = "megatron-core"
-version = "0.19.2"
+version = "0.20.0"
 requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
 
-# megatron-bridge 0.6.2 comes prebuilt from the wheelhouse (upstream tag v0.6.2),
-# pairing with megatron-core 0.19.2. The wheel's real metadata pulls a
-# conflicting transformers + NeMo stack (plus its own flashinfer pins), so we
-# declare EMPTY requires-dist (like `pip install --no-deps`) — the megatron extra
-# already provides torch / megatron-core / TE.
+# Curated Bridge runtime dependencies. Full upstream metadata additionally installs
+# pretraining services (MLflow/Comet) and inference kernels, which verl does not use.
+# Torch, Core, TE, Energon and ModelOpt are explicit in the megatron extra.
 [[tool.uv.dependency-metadata]]
 name = "megatron-bridge"
-version = "0.6.2"
+version = "0.8.0"
+requires-dist = [
+    "transformers>=5.15,<5.21", "peft>=0.20.0,<=0.21.0",
+    "hydra-core>=1.3.4,<1.4", "accelerate", "einops", "rich",
+    "mistral-common>=1.10.0", "diffusers>=0.36.0", "timm",
+    "nvidia-resiliency-ext",
+]
+
+# Apex's prebuilt wheel has no declared dependencies; Torch is explicit above.
+[[tool.uv.dependency-metadata]]
+name = "apex"
+version = "0.1"
 requires-dist = []
+
+# Match the unchanged wheel's metadata without downloading an entire CUDA wheel
+# when its host does not support HTTP range requests.
+[[tool.uv.dependency-metadata]]
+name = "flash-attn"
+version = "2.8.3"
+requires-dist = ["torch", "einops"]
+
+# Transformer Engine snapshot paired with Bridge main. Avoid lock-time CUDA builds.
+[[tool.uv.dependency-metadata]]
+name = "transformer-engine"
+version = "2.20.2+44f31bbe"
+requires-dist = [
+    "pydantic<2.14", "importlib-metadata>=1.0", "packaging", "torch>=2.1",
+    "einops", "onnxscript", "onnx", "nvdlfw-inspect", "nvidia-cudnn-frontend>=1.29.0",
+]
 
 # veomni 0.1.12 (pulled by BOTH the standalone `veomni` training backend and the
 # CI-only `veomni-sft` add-on) is installed deps-free: its metadata pins
@@ -485,29 +510,17 @@ requires-dist = []
 name = "TransferQueue"
 requires-dist = []
 
-# Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.13
-# / cp312, built for x86_64 AND aarch64) — no source build here. megatron-bridge
-# rides along (pure-python wheel off the same wheelhouse, so no git clone / build
-# either), and being py3-none-any it is the one wheelhouse component with a single
-# arch-independent build.
-#
-# The inference engines are deliberately NOT routed: upstream publishes cu130 /
-# torch-2.13 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
-# so the wheelhouse copies bought nothing (same builds, same download size, same
-# install time) while costing a hash-less index entry. flashinfer stays on PyPI
-# for the same reason — vllm/sglang pin their own and the wheelhouse's 0.6.13
-# matches neither.
+# Apex and FlashAttention use CUDA 13 / Torch 2.13 wheels on both Linux arches.
+# New Core/Bridge APIs are carried in companion fork commits pending upstream review.
 [tool.uv.sources]
 apex                 = { index = "verl-wheelhouse" }
 flash-attn           = { index = "verl-wheelhouse" }
-transformer-engine   = { index = "verl-wheelhouse" }
-megatron-bridge      = { index = "verl-wheelhouse" }
+transformer-engine   = { git = "https://github.com/NVIDIA/TransformerEngine.git", rev = "131157b5750b8578cb8efb78554f6fe6a671cc53" }
+megatron-bridge      = { git = "https://github.com/ISEEKYAN/Megatron-Bridge.git", rev = "77093170dfde0790c24758442194d97abeb2fde8" }
 veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "10a26aca258f91a7af3e698cc0db8c6c51705989" }
 
-# megatron-core isn't in the wheelhouse; git-sourced (built at sync
-# time). The wheelhouse megatron-bridge 0.6.2 (v0.6.2 tag) pairs with
-# megatron-core core_v0.19.2 — bump the two together.
-megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",          tag = "core_v0.19.2" }
+# Core 0.20 development baseline plus native RL API extensions.
+megatron-core      = { git = "https://github.com/ISEEKYAN/Megatron-LM.git", rev = "b1a29d72d161ed3cff6128889b11379da1127e3b" }
 
 # Per-extra routing to the matching pytorch wheel index.
 torch = [

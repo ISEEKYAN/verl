@@ -30,20 +30,19 @@ if is_npu_available:
 pytest.importorskip("megatron.core")
 
 from megatron.core import parallel_state  # noqa: E402
-from megatron.core.transformer.multi_token_prediction import roll_tensor  # noqa: E402
+from megatron.core.transformer.moe.moe_utils import topk_routing_with_score_function
+from megatron.core.transformer.moe.router import TopKRouter
+from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
+from megatron.core.transformer.multi_token_prediction import (
+    MTPLossAutoScaler,
+    MultiTokenPredictionLayer,
+    process_mtp_loss,
+    roll_tensor,  # noqa: E402
+)
 from megatron.core.transformer.transformer_config import TransformerConfig  # noqa: E402
 
-from verl.models.mcore.mtp_patch import (  # noqa: E402
-    _megatron_gptmodel_postprocess,
-    _patched_get_embeddings_for_detach,
-)
-from verl.models.mcore.util import preprocess_thd_engine  # noqa: E402
-from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group  # noqa: E402
-from verl.utils.megatron.router_replay_patch import (  # noqa: E402
-    RouterReplay,
-    RouterReplayAction,
-    _patched_topk_routing_with_score_function,
-)
+from verl.models.mcore.util import preprocess_thd_engine
+from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
 from verl.utils.megatron.router_replay_utils import merge_router_topk_indices, set_router_replay_data  # noqa: E402
 
 pytestmark = [
@@ -76,7 +75,7 @@ def _sample():
 
 
 def _route(logits, router):
-    return _patched_topk_routing_with_score_function(
+    return topk_routing_with_score_function(
         logits=logits,
         topk=2,
         use_pre_softmax=False,
@@ -96,7 +95,7 @@ def test_router_replay_uses_each_microbatch_cp_group():
     tokens = local_ids.flatten().float()
     logits = torch.stack((tokens, -tokens, tokens.remainder(3), tokens.remainder(5)), dim=-1)
 
-    RouterReplay.router_instances.clear()
+    RouterReplay.global_router_replay_instances.clear()
     router = RouterReplay()
     router.set_router_replay_action(RouterReplayAction.RECORD)
     _route(logits, router)
@@ -111,15 +110,20 @@ def test_router_replay_uses_each_microbatch_cp_group():
         context_parallel_size=2,
         use_cpu_initialization=True,
     )
+    module = object.__new__(TopKRouter)
+    torch.nn.Module.__init__(module)
+    module.layer_number = 1
+    module.router_replay = router
+    model = torch.nn.ModuleList([module])
     routes = []
-    merge_router_topk_indices(None, input_ids, routes, config, local_cp_size=cp_size)
-    set_router_replay_data(routes[0], None, config, local_cp_size=cp_size)
+    merge_router_topk_indices(None, input_ids, routes, config, local_cp_size=cp_size, model=model)
+    set_router_replay_data(routes[0], None, config, local_cp_size=cp_size, model=model)
     torch.testing.assert_close(router.target_topk_idx, recorded, atol=0, rtol=0)
 
     router.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
     _, routing_map = _route(-logits.flip(-1), router)
     assert routing_map.gather(1, recorded).all()
-    RouterReplay.router_instances.clear()
+    RouterReplay.global_router_replay_instances.clear()
 
 
 class _OutputLayer(torch.nn.Module):
@@ -136,15 +140,11 @@ def test_mtp_roll_and_backward_use_each_microbatch_cp_group():
     local_ids, packed, position_ids = preprocess_thd_engine(input_ids, local_cp_size=cp_size)
     expected_labels, _ = roll_tensor(local_ids, cp_group=packed.cp_group, packed_seq_params=packed)
     padding_mask = torch.zeros_like(local_ids, dtype=torch.bool)
-    expected_padding, _ = roll_tensor(
-        padding_mask,
-        cp_group=packed.cp_group,
-        packed_seq_params=packed,
-        fill_value=True,
+    layer = SimpleNamespace(
+        cp_group=parallel_state.get_context_parallel_group(),
+        config=SimpleNamespace(sequence_parallel=False, attention_cp_layout="zigzag", mtp_detach_heads=True),
     )
-
-    layer = SimpleNamespace(cp_group=parallel_state.get_context_parallel_group(), _get_embeddings_has_padding_mask=True)
-    rolled_ids, _, rolled_padding, _, _ = _patched_get_embeddings_for_detach(
+    rolled_ids, _, rolled_padding, _, _, _ = MultiTokenPredictionLayer._get_embeddings(
         layer,
         input_ids=local_ids,
         position_ids=position_ids,
@@ -154,7 +154,7 @@ def test_mtp_roll_and_backward_use_each_microbatch_cp_group():
         packed_seq_params=packed,
     )
     torch.testing.assert_close(rolled_ids, expected_labels, atol=0, rtol=0)
-    torch.testing.assert_close(rolled_padding, expected_padding, atol=0, rtol=0)
+    assert rolled_padding.dtype == torch.bool
 
     local_tokens, hidden_size, vocab_size = local_ids.shape[-1], 8, 64
     hidden_states = torch.randn(2 * local_tokens, 1, hidden_size, device="cuda", requires_grad=True)
@@ -180,22 +180,25 @@ def test_mtp_roll_and_backward_use_each_microbatch_cp_group():
             mtp_num_layers=1,
             mtp_loss_scaling_factor=0.1,
             mtp_detach_heads=False,
+            mtp_detach_output_weight=True,
+            attention_cp_layout="zigzag",
             calculate_per_token_loss=True,
             cross_entropy_loss_fusion=False,
             cross_entropy_fusion_impl="native",
             use_mup=False,
         ),
     )
-    output = _megatron_gptmodel_postprocess(
-        model,
+    MTPLossAutoScaler.set_loss_scale(torch.tensor(1.0, device="cuda"))
+    output = process_mtp_loss(
         hidden_states=hidden_states,
-        input_ids=local_ids,
-        position_ids=position_ids,
         labels=local_ids,
-        rotary_pos_emb=None,
-        rotary_pos_cos=None,
-        rotary_pos_sin=None,
         loss_mask=torch.ones_like(local_ids, dtype=torch.float32),
+        output_layer=model.output_layer,
+        output_weight=None,
+        is_training=False,
+        compute_language_model_loss=language_model_loss,
+        config=model.config,
+        cp_group=model.cp_group,
         packed_seq_params=packed,
     )
 

@@ -2728,7 +2728,7 @@ wheels = [
 [[package]]
 name = "megatron-bridge"
 version = "0.8.0"
-source = { git = "https://github.com/ISEEKYAN/Megatron-Bridge.git?rev=512ef78089cb4462395afb2253b0fe6ea06e8f4d#512ef78089cb4462395afb2253b0fe6ea06e8f4d" }
+source = { git = "https://github.com/ISEEKYAN/Megatron-Bridge.git?rev=77093170dfde0790c24758442194d97abeb2fde8#77093170dfde0790c24758442194d97abeb2fde8" }
 dependencies = [
     { name = "accelerate", marker = "(python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "diffusers", marker = "(python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine == 'aarch64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
@@ -7166,7 +7166,7 @@ requires-dist = [
     { name = "math-verify", marker = "extra == 'math'" },
     { name = "mathruler", marker = "extra == 'verl-core'" },
     { name = "matplotlib", marker = "extra == 'megatron'" },
-    { name = "megatron-bridge", marker = "extra == 'megatron'", git = "https://github.com/ISEEKYAN/Megatron-Bridge.git?rev=512ef78089cb4462395afb2253b0fe6ea06e8f4d" },
+    { name = "megatron-bridge", marker = "extra == 'megatron'", git = "https://github.com/ISEEKYAN/Megatron-Bridge.git?rev=77093170dfde0790c24758442194d97abeb2fde8" },
     { name = "megatron-core", marker = "extra == 'cpu'", git = "https://github.com/ISEEKYAN/Megatron-LM.git?rev=b1a29d72d161ed3cff6128889b11379da1127e3b" },
     { name = "megatron-core", marker = "extra == 'megatron'", git = "https://github.com/ISEEKYAN/Megatron-LM.git?rev=b1a29d72d161ed3cff6128889b11379da1127e3b" },
     { name = "megatron-energon", marker = "extra == 'megatron'", specifier = "==7.4.1" },

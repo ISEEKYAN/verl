@@ -77,6 +77,12 @@ Bridge layer mapping, padded token order, and exception cleanup. The focused
 Core tests are runnable without distributed test fixtures; their normal imports
 still exercise the real Core package.
 
+On dfw Slurm, the generated ``cpu`` extra installs and imports Torch
+2.13.0+cpu, Core 0.20.0 and Transformers 5.15.0. The focused verl suites pass
+80 tests with one GPU-only skip; the companion Core suites pass 15 tests in
+that same CPU environment. Transformer Engine and Apex are absent from this
+CPU environment. These results do not validate the locked CUDA runtime.
+
 Before promoting this preview, run the following GPU acceptance matrix:
 
 * Dense and MoE SFT plus RL actor/reference forwards, on TP/DP and PP/VPP meshes.

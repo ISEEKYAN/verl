@@ -93,10 +93,9 @@ top-k result contains duplicate expert indices, dispatcher token counts must be
 derived from the resulting routing map rather than assumed to equal
 ``num_tokens * topk``.
 
-The decoder input and hash-router interception are implemented in
-``verl/models/mcore/model_forward_fused.py`` and
-``verl/utils/megatron/router_replay_patch.py``. R3 mask construction and route
-distribution are implemented in
+Decoder token IDs reach native Core hash routing through
+``verl/models/mcore/model_forward.py``. Native Core owns hash-router replay.
+R3 mask construction and route distribution are implemented in
 ``verl/utils/megatron/router_replay_utils.py``.
 
 Model and kernel compatibility

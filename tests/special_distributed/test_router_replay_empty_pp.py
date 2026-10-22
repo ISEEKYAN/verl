@@ -20,13 +20,14 @@ import torch.distributed as dist
 pytest.importorskip("megatron.core")
 
 from megatron.core import parallel_state as mpu  # noqa: E402
-from megatron.core.transformer.transformer_config import TransformerConfig  # noqa: E402
+from megatron.core.transformer.moe.router import TopKRouter  # noqa: E402
+from megatron.core.transformer.moe.router_replay import RouterReplay  # noqa: E402
+from megatron.core.transformer.transformer_block import get_num_layers_to_build
+from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
 from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group  # noqa: E402
-from verl.utils.megatron.router_replay_patch import RouterReplay  # noqa: E402
 from verl.utils.megatron.router_replay_utils import (  # noqa: E402
-    RouterReplayHelper,
-    get_current_rank_layer_info,
     is_moe_layer,
     pp_gather,
     reorder_and_merge_vpp_layers,
@@ -75,24 +76,26 @@ def test_empty_and_uneven_pp_collectives(monkeypatch, nested, vpp_size, all_dens
 
     chunks = []
     layers_by_chunk = []
+    model_chunks = []
     for vp_stage in range(vpp_size or 1):
-        layer_range = get_current_rank_layer_info(config, vp_stage)
-        layers = [idx + 1 for idx in range(layer_range["start"], layer_range["end"]) if is_moe_layer(config, idx)]
+        start = get_transformer_layer_offset(config, vp_stage=vp_stage)
+        count = get_num_layers_to_build(config, vp_stage=vp_stage)
+        layers = [idx + 1 for idx in range(start, start + count) if is_moe_layer(config, idx)]
+        routers = []
+        for layer in layers:
+            router = object.__new__(TopKRouter)
+            torch.nn.Module.__init__(router)
+            router.layer_number = layer
+            router.router_replay = RouterReplay()
+            routers.append(router)
+        model_chunks.append(torch.nn.ModuleList(routers))
         chunks.append(make_routes(layers))
         layers_by_chunk.append(layers)
     local_routes = reorder_and_merge_vpp_layers(chunks, 1, vpp_size, 1) if vpp_size else chunks[0]
-    gathered = pp_gather(local_routes, config)
+    gathered = pp_gather(local_routes, config, model_chunks)
     expected = make_routes([idx + 1 for idx, flag in enumerate(frequency) if flag])
 
     assert gathered.dtype == torch.int16
     assert gathered.device.type == "cpu"
     for actual_sample, expected_sample in zip(gathered.unbind(), expected.unbind(), strict=True):
         torch.testing.assert_close(actual_sample, expected_sample, atol=0, rtol=0)
-
-    for registry in (
-        [layer for layers in layers_by_chunk for layer in layers],
-        [idx + 1 for idx, flag in enumerate(frequency) if flag],
-    ):
-        monkeypatch.setattr(RouterReplay, "router_instances", registry)
-        for vp_stage, layers in enumerate(layers_by_chunk):
-            assert RouterReplayHelper.get_micro_batch_router_list(config, vp_stage) == layers

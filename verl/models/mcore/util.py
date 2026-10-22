@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
 import logging
 import math
 import os
@@ -30,14 +29,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 ContextParallelLayout = Literal["zigzag", "contiguous"]
-
-# Older Megatron-core releases have no ``cp_partition_mode`` field on PackedSeqParams; they
-# support only the zigzag CP layout. Inspect ``__init__`` rather than dataclass fields so that
-# duck-typed replacements (e.g. test stubs taking ``**kwargs``) also count as supporting it.
-_PACKED_SEQ_PARAMS_INIT_PARAMS = inspect.signature(PackedSeqParams.__init__).parameters
-_PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE = "cp_partition_mode" in _PACKED_SEQ_PARAMS_INIT_PARAMS or any(
-    p.kind is inspect.Parameter.VAR_KEYWORD for p in _PACKED_SEQ_PARAMS_INIT_PARAMS.values()
-)
 
 
 def _packed_seq_params_supports(field_name: str) -> bool:
@@ -286,8 +277,6 @@ def preprocess_thd_engine(
     else:
         cp_size = mpu.get_context_parallel_world_size()
         cp_rank = mpu.get_context_parallel_rank()
-    if _packed_seq_params_supports("cp_partition_mode"):
-        extra_packed_args["cp_partition_mode"] = cp_layout
     cp_layout_factor = 2 if cp_layout == "zigzag" and cp_size > 1 else 1
     align_size = tp_size * cp_size * cp_layout_factor
     seqlens_in_batch = input_ids.offsets().diff()
@@ -454,18 +443,6 @@ def preprocess_thd_engine(
                     input_ids_rmpad[k] = v
                 for k, v in saved_position_roll_dict.items():
                     position_ids_rmpad[k] = v
-
-    if _PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE:
-        # Tell the attention kernels how the rows above were sharded across CP ranks. The rows
-        # are already split according to `cp_layout`, but PackedSeqParams defaults to "zigzag",
-        # so without this an attention variant that requires a contiguous split (DeepSeek-V4)
-        # raises "DSv4 THD CP requires a contiguous CP partition." on every forward.
-        extra_packed_args["cp_partition_mode"] = cp_layout
-    elif cp_layout != "zigzag" and cp_size > 1:
-        raise ValueError(
-            f"cp_layout='{cp_layout}' requires PackedSeqParams.cp_partition_mode, which this "
-            "Megatron-core version does not provide. Upgrade Megatron-core or use the zigzag layout."
-        )
 
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",

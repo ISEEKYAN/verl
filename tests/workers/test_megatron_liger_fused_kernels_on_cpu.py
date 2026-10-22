@@ -85,10 +85,10 @@ def test_configuration_requires_token_capacity(engine_config):
 def test_patch_owns_backend_selection_and_runtime_setup(monkeypatch, engine_config, use_liger, dtype, post_process):
     model = _model(post_process, dtype=dtype)
     calls = []
-    monkeypatch.setattr(mff, "_get_patching_model", lambda value: value)
-    monkeypatch.setattr(mff, "_resolve_fused_forward_mode", lambda value: mff._HOOK_MODE)
+    monkeypatch.setattr(mff, "get_language_model", lambda value: value)
+    monkeypatch.setattr(mff, "validate_native_model", lambda value: None)
     monkeypatch.setattr(mff, "_configure_liger_runtime", lambda model, config: calls.append((model, config)) or True)
-    mff.patch_fused_forward(model, SimpleNamespace(use_liger=use_liger), engine_config=engine_config)
+    mff.configure_fused_forward(model, SimpleNamespace(use_liger=use_liger), engine_config=engine_config)
     assert getattr(model, mff._FUSED_IMPL_BACKEND_ATTR) == ("liger" if use_liger else "triton")
     assert calls == ([(model, engine_config)] if use_liger and dtype == torch.bfloat16 else [])
 
@@ -101,7 +101,7 @@ def test_engine_delegates_all_virtual_chunks(monkeypatch, engine_config):
     engine.module = [_model(False), _model(True)]
     calls = []
     monkeypatch.setattr(
-        mff, "patch_fused_forward", lambda model, config, **kwargs: calls.append((model, config, kwargs))
+        mff, "configure_fused_forward", lambda model, config, **kwargs: calls.append((model, config, kwargs))
     )
     engine._maybe_enable_fused_kernels()
     assert calls == [(model, engine.model_config, {"engine_config": engine_config}) for model in engine.module]

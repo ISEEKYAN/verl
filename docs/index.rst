@@ -119,6 +119,7 @@ verl is fast with:
 
    advance/fsdp_extension
    advance/megatron_extension
+   advance/megatron_native_backend
    advance/deepseek_v4_integration
    advance/megatron_lite_backend
 

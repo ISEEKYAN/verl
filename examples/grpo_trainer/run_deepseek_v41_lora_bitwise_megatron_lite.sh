@@ -65,7 +65,9 @@
 #   bash examples/grpo_trainer/run_deepseek_v41_lora_bitwise_megatron_lite.sh --mode long262k [Hydra overrides...]
 #   Start one container per node from the image, form a Ray cluster across both nodes
 #   (ray start --head / ray start --address, --object-store-memory=8589934592 per node), then run
-#   this script on the head node (RAY_ADDRESS points verl at the existing cluster).
+#   this script on the head node (RAY_ADDRESS points verl at the existing cluster). Mount VERL_ROOT
+#   and MEGATRON_ROOT at the same paths on both nodes: the script forwards PYTHONPATH to the Ray
+#   workers through runtime_env, since pre-started workers do not inherit the driver environment.
 set -euo pipefail
 
 MEGATRON_COMMIT=915b94e097b51e3f7a11efe5a3279980c48dc1fb
@@ -131,6 +133,7 @@ export VLLM_MEGAMOE_LORA_FUSED=1 VLLM_LORA_OVERLAP_SHRINK=1 CUBLAS_WORKSPACE_CON
 COMMON_ARGS=(
   '++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_MEGAMOE_LORA_FUSED="1"'
   '++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LORA_OVERLAP_SHRINK="1"'
+  "++ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=\"${PYTHONPATH}\""
 )
 
 MODE_ARGS=()
@@ -153,6 +156,8 @@ case "${MODE}" in
       "++actor_rollout_ref.actor.engine.impl_cfg.attention_deterministic_backward=False"
       "++actor_rollout_ref.actor.engine.impl_cfg.head_chunk_size=1024"
       "data.dataloader_num_workers=0"
+      # The validated 262K run scored with the naive manager; the overlong penalty is not applied.
+      "reward.reward_manager.name=naive"
     )
     ;;
   rl)
@@ -161,11 +166,15 @@ case "${MODE}" in
     export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}" MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-2048}"
     export PPO_MAX_TOKEN_LEN="${PPO_MAX_TOKEN_LEN:-8192}" LOG_PROB_MAX_TOKEN_LEN="${LOG_PROB_MAX_TOKEN_LEN:-8192}"
     export ROLLOUT_FULL_DETERMINISM=False PROMPT_MODE="${PROMPT_MODE:-thinking}"
+    export OVERLONG_BUFFER_LEN="${OVERLONG_BUFFER_LEN:-4096}"
     MODE_ARGS=(
       "++actor_rollout_ref.rollout.custom.ds41_lora_sleep_mode=kv_only"
       "++actor_rollout_ref.actor.engine.exclusive_rollout=False"
       "++actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_memory_bytes=2147483648"
       "++actor_rollout_ref.actor.engine.impl_cfg.head_chunk_size=1024"
+      # DAPO reward with the overlong penalty, as in the measured 25-step DAPO run.
+      "reward.reward_manager.name=dapo"
+      "++reward.reward_kwargs.max_resp_len=8192"
     )
     ;;
 esac

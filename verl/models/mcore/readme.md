@@ -155,3 +155,19 @@ until their verl consumers use the native contracts: Core PR #8673 covers only
 output-weight detachment, and #8674 covers masked replay. Merging either PR alone
 does not retire every part of these legacy adapters. Recompute has no validated
 retirement boundary yet; coordinate verl PR #8338 and measure memory first.
+
+## Native output execution
+
+Eager and fused execution share `model_forward.py` for THD/BSHD packing, packed
+labels, dynamic-CP metadata and output unpacking. Fused output uses an immutable
+per-forward context and Core's output callback; it never replaces model `forward`.
+Sequence-parallel gathers use the output layer's TP group, with the existing
+backend-specific hidden-gradient reduction contract. The callback converts
+sequence-major hidden states to batch-major token order before the fused kernel.
+
+Providers without the callback contract use eager output. On Core versions without
+native parameter-readiness support, overlapped parameter gathering also uses eager
+output unless the helper from verl PR #8029 is installed. This refactor reuses that
+work instead of introducing a second bucket-synchronization patch. MTP/replay
+migration and recompute retirement remain separate roadmap slices. The engine's
+existing MTP/value-model fused exclusions remain in force for this slice.

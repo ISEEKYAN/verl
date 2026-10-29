@@ -32,14 +32,13 @@ def test_router_record_and_replay_use_dynamic_cp_size(monkeypatch):
     calls = []
     gathered_dtypes = []
     router = SimpleNamespace(recorded_topk_idx=torch.tensor([[1], [2]]))
-    monkeypatch.setattr(router_utils.RouterReplayHelper, "get_micro_batch_router_list", lambda *_args: [router])
+    monkeypatch.setattr(router_utils, "iter_model_routers", lambda *_args: iter([(1, router)]))
     monkeypatch.setattr(
         router_utils,
         "gather_from_sequence_parallel_region",
         lambda tensor, **_kwargs: gathered_dtypes.append(tensor.dtype) or tensor,
     )
     monkeypatch.setattr(router_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
-    monkeypatch.setattr(router_utils, "get_current_rank_layer_info", lambda *_args: {"start": 0, "end": 1})
     monkeypatch.setattr(router_utils, "device_name", "cpu")
 
     # The route tensor reaches preprocess_thd_engine only on the replay side, and by
@@ -65,7 +64,7 @@ def test_router_record_and_replay_use_dynamic_cp_size(monkeypatch):
     input_ids = _nested([torch.arange(2)])
     recorded = []
     config = SimpleNamespace(fp8=None, num_layers=1, moe_layer_freq=1)
-    router_utils.merge_router_topk_indices(None, input_ids, recorded, config, local_cp_size=2)
+    router_utils.merge_router_topk_indices(None, input_ids, recorded, config, local_cp_size=2, model=SimpleNamespace())
 
     # int16 has no NCCL datatype, so the collective must see the uint8 view while the
     # recorded routes land back as int16.
@@ -74,7 +73,7 @@ def test_router_record_and_replay_use_dynamic_cp_size(monkeypatch):
 
     target = {}
     router.set_target_indices = lambda indices, replay_mask=None: target.update(indices=indices, mask=replay_mask)
-    router_utils.set_router_replay_data(recorded[0], None, config, local_cp_size=2)
+    router_utils.set_router_replay_data(recorded[0], None, config, local_cp_size=2, model=SimpleNamespace())
 
     assert calls == [2, 2, 2]
     torch.testing.assert_close(target["indices"], torch.tensor([[1], [2]]))
@@ -115,12 +114,16 @@ def test_pp_gather_normalizes_nested_routes_to_cpu(monkeypatch):
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda _group: 2)
 
     def fake_all_gather(output, value, _group):
-        assert value.device.type == "cpu"
-        output[:] = [value, remote]
+        if isinstance(value, list):
+            output[:] = [[1], [2]]
+        else:
+            assert value.device.type == "cpu"
+            output[:] = [value, remote]
 
     monkeypatch.setattr(torch.distributed, "all_gather_object", fake_all_gather)
     config = SimpleNamespace(pipeline_model_parallel_size=2, virtual_pipeline_model_parallel_size=None)
-    routes = router_utils.pp_gather(local, config)
+    monkeypatch.setattr(router_utils, "iter_model_routers", lambda *_args: iter([(1, object())]))
+    routes = router_utils.pp_gather(local, config, [object()])
 
     assert routes.device.type == "cpu"
     assert routes.dtype == torch.int16
@@ -148,7 +151,11 @@ def test_pp_gather_supports_zero_layer_bshd_stage(monkeypatch):
     monkeypatch.setattr(torch.distributed, "all_gather", fake_all_gather)
     config = SimpleNamespace(pipeline_model_parallel_size=2, virtual_pipeline_model_parallel_size=None)
 
-    routes = router_utils.pp_gather(local, config)
+    monkeypatch.setattr(router_utils, "iter_model_routers", lambda *_args: iter([]))
+    monkeypatch.setattr(
+        torch.distributed, "all_gather_object", lambda out, value, group: out.__setitem__(slice(None), [[], [1, 2]])
+    )
+    routes = router_utils.pp_gather(local, config, [object()])
 
     assert collective_calls == [((1,), False), ((1, 3, 2, 4), False)]
     assert routes.shape == remote.shape

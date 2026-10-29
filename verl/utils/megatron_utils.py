@@ -16,22 +16,20 @@
 # limitations under the License.
 """Pretrain utilities."""
 
-import inspect
 import logging
 import os
 from dataclasses import dataclass
 from typing import Any
 
 import torch
-from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.parallel_state import get_global_memory_buffer
-from megatron.core.transformer import MLATransformerConfig, TransformerConfig
-from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.utils import unwrap_model as unwrap_model
 from transformers import PretrainedConfig
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
@@ -323,35 +321,14 @@ def make_megatron_module(
 
     # Create DDP config if needed
 
-    # Megatron-Bridge >= v0.5.0 provides apply_overrides_and_finalize.
-    # Megatron-Bridge <  v0.5.0 does not, so we fall back to manual setattr + finalize.
-    try:
-        from megatron.bridge.training.utils.config_utils import create_ddp_config
+    from megatron.bridge.training.utils.config_utils import create_ddp_config
 
-        ddp_config = create_ddp_config(
-            wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
-            use_distributed_optimizer=wrap_config.use_distributed_optimizer,
-            use_megatron_fsdp=wrap_config.use_megatron_fsdp,
-            overrides=override_ddp_config,
-        )
-    except ImportError:
-        ddp_config = None
-        if wrap_config.wrap_with_ddp and not layer_wise_ddp:
-            from megatron.bridge.training.config import DistributedDataParallelConfig
-
-            ddp_config_dict = {
-                "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
-            }
-            if wrap_config.use_megatron_fsdp:
-                ddp_config_dict["use_distributed_optimizer"] = True
-                ddp_config_dict.setdefault("check_for_nan_in_grad", True)
-                ddp_config_dict.setdefault("use_megatron_fsdp", True)
-                ddp_config_dict.setdefault("data_parallel_sharding_strategy", "optim_grads_params")
-                ddp_config_dict.setdefault("overlap_grad_reduce", True)
-            if override_ddp_config is not None:
-                ddp_config_dict.update(override_ddp_config)
-            ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
-            ddp_config.finalize()
+    ddp_config = create_ddp_config(
+        wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
+        use_distributed_optimizer=wrap_config.use_distributed_optimizer,
+        use_megatron_fsdp=wrap_config.use_megatron_fsdp,
+        overrides=override_ddp_config,
+    )
 
     # Now call provide_distributed_model with all hooks registered
     # Hooks will be applied automatically before DDP wrapping
@@ -377,36 +354,7 @@ def make_megatron_module(
 
     # Extract TransformerConfig from the created model
     tf_config = get_model_config(model[0] if isinstance(model, list) else model)
-    if isinstance(tf_config, MLATransformerConfig):
-        # Apply MLA compatibility patches after model creation.
-        from verl.models.mcore.patch import apply_patch
-
-        apply_patch()
     return model, tf_config
-
-
-try:
-    from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as _MegatronFSDP
-    from megatron.core.distributed.fsdp.src.megatron_fsdp.megatron_fsdp import MegatronFSDP
-
-    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module, _MegatronFSDP, MegatronFSDP)
-except ImportError:
-    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
-
-
-def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
-    return_list = True
-    if not isinstance(model, list):
-        model = [model]
-        return_list = False
-    unwrapped_model = []
-    for model_module in model:
-        while isinstance(model_module, module_instances):
-            model_module = model_module.module
-        unwrapped_model.append(model_module)
-    if not return_list:
-        return unwrapped_model[0]
-    return unwrapped_model
 
 
 def _can_safely_resize_storage(tensor: torch.Tensor) -> bool:
@@ -896,158 +844,19 @@ def get_dist_checkpoint_path(checkpoint_path):  # pragma: no cover - back-compat
 
 
 def get_transformer_layer_offset(pipeline_rank, vp_stage, config: TransformerConfig):
-    """
-    Get the index offset of any pipeline stage, given the level of pipelining.
+    """Use Megatron's authoritative pipeline layout calculation."""
+    from megatron.core.transformer.transformer_layer import get_transformer_layer_offset as native_layer_offset
 
-    Make pipeline_rank and vp_stage as two arguments to make it more flexible,
-    which is able to fetch layer offset for any pipeline stage.
-    The original function only returns the layer offset for current pipeline stage.
-
-    Extension to https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/transformer_layer.py::get_transformer_layer_offset
-    """
-
-    has_vp_stage = (
-        inspect.signature(parallel_state.is_pipeline_first_stage).parameters.get("vp_stage", None) is not None
-    )
-    extra_kwargs = {} if not has_vp_stage else {"ignore_virtual": False, "vp_stage": vp_stage}
-
-    if config.pipeline_model_parallel_size > 1:
-        if hasattr(config, "pipeline_model_parallel_layout") and config.pipeline_model_parallel_layout:
-            from megatron.core.transformer.enums import LayerType
-
-            offset = config.pipeline_model_parallel_layout.get_layer_offset(
-                layer_type=LayerType.decoder, vp_stage=vp_stage
-            )
-        elif (
-            config.num_layers_in_first_pipeline_stage is not None
-            or config.num_layers_in_last_pipeline_stage is not None
-        ):
-            # Calculate number of pipeline stages to distribute the remaining Transformer
-            # layers after deducting the Transformer layers in the first or the last stages
-            middle_pipeline_stages = config.pipeline_model_parallel_size
-            middle_pipeline_stages -= sum(
-                [
-                    1 if x is not None else 0
-                    for x in (
-                        config.num_layers_in_first_pipeline_stage,
-                        config.num_layers_in_last_pipeline_stage,
-                    )
-                ]
-            )
-
-            # Calculate layers to distribute in each pipeline stage. If the
-            # num_layers_in_first_pipeline_stage and num_layers_in_last_pipeline_stage
-            # are not set, we will not enable uneven pipeline. All layers will be treated
-            # as middle layers.
-            num_layers_in_first_pipeline_stage = (
-                0 if config.num_layers_in_first_pipeline_stage is None else config.num_layers_in_first_pipeline_stage
-            )
-            num_layers_in_last_pipeline_stage = (
-                0 if config.num_layers_in_last_pipeline_stage is None else config.num_layers_in_last_pipeline_stage
-            )
-
-            middle_num_layers = (
-                config.num_layers - num_layers_in_first_pipeline_stage - num_layers_in_last_pipeline_stage
-            )
-
-            if (vp_size := config.virtual_pipeline_model_parallel_size) is not None:
-                assert vp_stage is not None, "vp_stage must be provided if virtual pipeline model parallel size is set"
-
-                # Calculate number of layers in each virtual model chunk
-                # If the num_layers_in_first_pipeline_stage and
-                # num_layers_in_last_pipeline_stage are not set, all pipeline stages
-                # will be treated as middle pipeline stages in the calculation
-                num_layers_per_virtual_model_chunk_in_first_pipeline_stage = (
-                    0
-                    if config.num_layers_in_first_pipeline_stage is None
-                    else config.num_layers_in_first_pipeline_stage // vp_size
-                )
-
-                num_layers_per_virtual_model_chunk_in_last_pipeline_stage = (
-                    0
-                    if config.num_layers_in_last_pipeline_stage is None
-                    else config.num_layers_in_last_pipeline_stage // vp_size
-                )
-
-                num_layers_per_vritual_model_chunk_in_middle_pipeline_stage = middle_num_layers // vp_size
-
-                # First stage + middle stage + last stage
-                total_virtual_chunks = (
-                    num_layers_per_virtual_model_chunk_in_first_pipeline_stage
-                    + num_layers_per_vritual_model_chunk_in_middle_pipeline_stage
-                    + num_layers_per_virtual_model_chunk_in_last_pipeline_stage
-                )
-
-                # Calculate the layer offset with interleaved uneven pipeline parallelism
-                if pipeline_rank == 0:
-                    offset = vp_stage * total_virtual_chunks
-                else:
-                    offset = (
-                        vp_stage * total_virtual_chunks
-                        + num_layers_per_virtual_model_chunk_in_first_pipeline_stage
-                        + (pipeline_rank - 1)
-                        * (num_layers_per_vritual_model_chunk_in_middle_pipeline_stage // middle_pipeline_stages)
-                    )
-            else:
-                if middle_pipeline_stages > 0:
-                    num_layers_per_pipeline_rank = middle_num_layers // middle_pipeline_stages
-                else:
-                    num_layers_per_pipeline_rank = 0
-
-                middle_pipeline_rank = (
-                    pipeline_rank if config.num_layers_in_first_pipeline_stage is None else pipeline_rank - 1
-                )
-
-                if pipeline_rank == 0:
-                    offset = 0
-                else:
-                    offset = (middle_pipeline_rank * num_layers_per_pipeline_rank) + num_layers_in_first_pipeline_stage
-        else:
-            num_layers = config.num_layers
-
-            # Increase the number of layers by one if we include the embedding (loss)
-            # layer into pipeline parallelism partition and placement
-            if config.account_for_embedding_in_pipeline_split:
-                num_layers += 1
-
-            if config.account_for_loss_in_pipeline_split:
-                num_layers += 1
-
-            num_layers_per_pipeline_rank = num_layers // config.pipeline_model_parallel_size
-
-            if (vp_size := config.virtual_pipeline_model_parallel_size) is not None:
-                assert vp_stage is not None, "vp_stage must be provided if virtual pipeline model parallel size is set"
-
-                num_layers_per_virtual_rank = num_layers_per_pipeline_rank // vp_size
-                total_virtual_chunks = num_layers // vp_size
-                offset = vp_stage * total_virtual_chunks + (pipeline_rank * num_layers_per_virtual_rank)
-
-                # Reduce the offset of embedding layer from the total layer number
-                if config.account_for_embedding_in_pipeline_split and not parallel_state.is_pipeline_first_stage(
-                    **extra_kwargs
-                ):
-                    offset -= 1
-            else:
-                offset = pipeline_rank * num_layers_per_pipeline_rank
-
-                # Reduce the offset of embedding layer from the total layer number
-                if config.account_for_embedding_in_pipeline_split and not parallel_state.is_pipeline_first_stage(
-                    **extra_kwargs
-                ):
-                    offset -= 1
-    else:
-        offset = 0
-    return offset
+    return native_layer_offset(config, vp_stage=vp_stage, pp_rank=pipeline_rank)
 
 
 def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     from megatron.core.distributed import finalize_model_grads
+    from megatron.core.distributed.fsdp.mcore_fsdp_adapter import (
+        FullyShardedDataParallelV1,
+        FullyShardedDataParallelV2,
+    )
     from megatron.core.utils import get_model_config
-
-    try:
-        from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
-    except ImportError:
-        megatron_FSDP = DDP
 
     # register some callbacks for megatron training, following https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.0rc7/megatron/training/training.py#L2039-L2057
     for one_model in model:
@@ -1060,7 +869,7 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
         align_grad_reduce = True  # default to True, seldom to be false
         align_param_gather = getattr(one_model.ddp_config, "align_param_gather", False)
 
-        if isinstance(model[0], megatron_FSDP | DDP) and overlap_grad_reduce:
+        if isinstance(model[0], DDP | FullyShardedDataParallelV1 | FullyShardedDataParallelV2) and overlap_grad_reduce:
             assert config.no_sync_func is None, (
                 "When overlap_grad_reduce is True, config.no_sync_func must be None; "
                 "a custom no_sync_func is not supported when overlapping grad-reduce"
@@ -1217,31 +1026,6 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
                 model_config.mtp.mtp_loss_scaling_factor
             )
     return
-
-
-def patch_engine_mtp(module, model_config):
-    """
-    Apply MTP patches to the model module.
-
-    Args:
-        module: The model module to patch. Can be a single module or a list of modules.
-        model_config: The model configuration containing MTP settings.
-    """
-    logger.warning("Applying mtp patch...")
-    from verl.models.mcore.mtp_patch import (
-        patch_mtp_layer_checkpointed_forward,
-        patch_mtp_layer_get_embeddings,
-        patch_postprocess,
-    )
-
-    print(module)
-
-    modules = module if isinstance(module, list) else [module]
-    for m in modules:
-        patch_postprocess(m)
-        patch_mtp_layer_checkpointed_forward(m)
-        if model_config.mtp.detach_encoder:
-            patch_mtp_layer_get_embeddings(m)
 
 
 @torch.no_grad()

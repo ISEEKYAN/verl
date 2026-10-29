@@ -14,48 +14,27 @@
 
 """Router replay addressed through the forwarded model rather than the global router list.
 
-Every ``RouterReplay`` appends itself to the process-global ``RouterReplay.router_instances``, so
+Every ``RouterReplay`` appends itself to the process-global ``RouterReplay.global_router_replay_instances``, so
 when a build registers routers that are not part of the final model
 for Qwen3-VL — that list is longer than the model's local layer count and a positional slice of it
 addresses the wrong objects. Replay targets then land on orphans while the real routers keep an
 unset ``target_topk_idx``, and the action toggle never reaches the routers that actually forward.
 
-Megatron-Core is not importable in the lightweight CPU CI image, so the ``megatron.core`` surfaces
-``router_replay_utils`` needs at import are stubbed with ``MagicMock`` via ``sys.modules``
-(``setdefault``, so a real install wins), along with ``verl.models.mcore.util`` — importing it for
-real pulls in the whole Megatron model-provider registry. The sequence-parallel scatter and the
-pack/unpack are monkeypatched to identity so the tests exercise the addressing, not the tensor
-plumbing (that is covered by the GPU and e2e suites).
+The tests import native Core RouterReplay. Sequence-parallel communication and
+packing are replaced by identity operations only in the model-addressing cases;
+layout roundtrips have separate native CPU coverage.
 """
 
-import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-for _mod in (
-    "megatron",
-    "megatron.core",
-    "megatron.core.pipeline_parallel",
-    "megatron.core.pipeline_parallel.schedules",
-    "megatron.core.pipeline_parallel.utils",
-    "megatron.core.tensor_parallel",
-    "megatron.core.transformer",
-    "megatron.core.transformer.moe",
-    "megatron.core.transformer.moe.moe_utils",
-    "megatron.core.transformer.moe.router",
-    "megatron.core.transformer.moe.token_dispatcher",
-    "megatron.core.transformer.transformer_config",
-    "megatron.core.transformer.transformer_layer",
-    "verl.models.mcore.util",
-):
-    sys.modules.setdefault(_mod, MagicMock())
+pytest.importorskip("megatron.core")
 
+from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction  # noqa: E402
 
 from verl.utils.megatron import router_replay_utils  # noqa: E402
-from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction  # noqa: E402
 
 NUM_LAYERS = 4
 NUM_TOKENS = 3
@@ -85,11 +64,11 @@ def orphans_then_model(monkeypatch):
     """Register routers that never make it into the model, then build the model — the registration
     order a preliminary model build can produce."""
     monkeypatch.setattr(router_replay_utils, "TopKRouter", FakeTopKRouter)
-    RouterReplay.router_instances.clear()
+    RouterReplay.global_router_replay_instances.clear()
     orphans = [RouterReplay() for _ in range(NUM_LAYERS)]
     model = _build_model()
     yield orphans, model
-    RouterReplay.router_instances.clear()
+    RouterReplay.global_router_replay_instances.clear()
 
 
 @pytest.fixture

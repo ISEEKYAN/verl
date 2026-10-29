@@ -528,8 +528,6 @@ class MegatronEngine(BaseEngine):
 
             self.module = apply_qat_to_modules(self.module, self._qat_config)
 
-        self._maybe_enable_fused_kernels()
-
         from verl.models.mcore.compat import apply_model_patches
 
         apply_model_patches(
@@ -539,6 +537,10 @@ class MegatronEngine(BaseEngine):
             forward_only=self.engine_config.forward_only,
             mtp_num_layers=self.engine_config.override_transformer_config.get("mtp_num_layers"),
         )
+
+        # Select output execution after compatibility has selected the actual
+        # postprocess implementation, including zero-MTP reference models.
+        self._maybe_enable_fused_kernels()
 
         # For forward_only, we don't need optimizer, lr_scheduler, checkpoint_mananager
         if self.engine_config.forward_only:

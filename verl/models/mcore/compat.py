@@ -206,7 +206,13 @@ def has_output_processor(model):
 
     from verl.utils.megatron.native import get_language_model
 
-    parameters = inspect.signature(get_language_model(model).forward).parameters
+    model = get_language_model(model)
+    # The retained MTP postprocess accepts these kwargs but does not execute the
+    # callback. It must stay on eager output until the MTP migration (slice 3).
+    postprocess = getattr(model, "_postprocess", None)
+    if getattr(postprocess, "__module__", None) == "verl.models.mcore.mtp_patch":
+        return False
+    parameters = inspect.signature(model.forward).parameters
     return {"output_processor", "output_processor_context"}.issubset(parameters)
 
 

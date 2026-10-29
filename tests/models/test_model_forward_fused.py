@@ -270,3 +270,15 @@ def test_real_core_forward_uses_callback_without_replacement():
     result.backward()
     torch.testing.assert_close(hidden.grad, 2 * hidden.detach())
     assert model.forward.__func__ is original
+
+
+def test_retained_mtp_postprocess_cannot_advertise_native_output_hooks():
+    from types import MethodType
+
+    from verl.models.mcore import mtp_patch
+
+    model = NativeModel()
+    model._postprocess = MethodType(mtp_patch._megatron_gptmodel_postprocess, model)
+    original = model.forward.__func__
+    assert not mff.configure_fused_forward(model)
+    assert model.forward.__func__ is original

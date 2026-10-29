@@ -1,9 +1,9 @@
 Megatron native API refactor preview
 ===================================
 
-Last updated: 10/22/2026.
+Last updated: 10/29/2026.
 
-This fork preview upgrades the Megatron integration to a fixed Core 0.20 / Bridge
+This fork preview upgrades the Megatron integration to a fixed Core 0.21 / Bridge
 0.8 development snapshot. The dependency manifest and lockfile identify the exact
 revisions, including the companion Core and Bridge changes. GPU acceptance is a
 separate gate from CPU interface and gradient tests.
@@ -54,11 +54,11 @@ Dependency and platform boundary
 -------------------------------
 
 Use the branch's generated ``uv.lock`` for CUDA Linux x86_64/aarch64. Core,
-Bridge, and Transformer Engine are upgraded together. Older platform images and
-Transformer Engine is built from its fixed source revision against runtime Torch
+Bridge, and Transformer Engine are pinned together. Transformer Engine is built from its fixed source revision against runtime Torch
 and CUDA. The sync host therefore needs the CUDA toolkit and the build tools
-listed in the Megatron extra. Shared Transformers moves to 5.15.0 to satisfy
-Bridge 0.8; combined vLLM/SGLang runs need inference acceptance on this version.
+listed in the Megatron extra. The October 29 refresh preserves upstream Transformers 5.16.1, vLLM 0.32.0,
+DeepEP 1.2.1 and quantization-aware THD alignment. Combined vLLM/SGLang runs
+need inference acceptance on this baseline.
 Older images and custom providers need the same native contracts; model initialization reports
 missing interfaces before training. Ascend and ROCm acceptance require their
 own environment validation against this baseline.
@@ -77,11 +77,18 @@ Bridge layer mapping, padded token order, and exception cleanup. The focused
 Core tests are runnable without distributed test fixtures; their normal imports
 still exercise the real Core package.
 
-On dfw Slurm, the generated ``cpu`` extra installs and imports Torch
+The October 22 baseline on Slurm used the generated ``cpu`` extra to install and import Torch
 2.13.0+cpu, Core 0.20.0 and Transformers 5.15.0. The focused verl suites pass
 80 tests with one GPU-only skip; the companion Core suites pass 15 tests in
 that same CPU environment. Transformer Engine and Apex are absent from this
 CPU environment. These results do not validate the locked CUDA runtime.
+
+The October 29 refresh passes 50 focused Core tests (one CUDA skip) and
+29 focused verl tests. The latter also pass after installing the generated CPU
+lock with Torch 2.13.0+cpu, Core 0.21.0 and Transformers 5.16.1. On H100,
+8 router replay tests pass, including bit-exact CPU/CUDA route, score and
+gradient checks. That GPU run uses the existing Torch 2.11 / TE 2.15 image;
+it does not validate the new locked CUDA environment.
 
 Before promoting this preview, run the following GPU acceptance matrix:
 
@@ -102,6 +109,13 @@ and the output-processor integration #6933. The preview changes the shared nativ
 boundary used by open work #8029 (readiness), #7826 (BSHD fused MTP), #8031 (MTP
 head gradients), #8074 (EP overlap), #7192 (Hybrid MTP) and #8235 (resume/offload).
 Those changes should be coordinated before proposing an upstream implementation.
+
+Track progress in `Modern Megatron integration RFC #8324
+<https://github.com/verl-project/verl/issues/8324>`_. Current Core already includes
+the Hybrid output callback (#7054); the refresh reuses that implementation. The
+MoE recompute storage work in #8338 makes memory parity an explicit gate before
+removing the legacy implementation. CPU interface coverage cannot establish that
+memory gate.
 
 An upstream tracking issue can use this document's architecture, implementation
 list and remaining acceptance matrix. The fork PR is the review surface for the

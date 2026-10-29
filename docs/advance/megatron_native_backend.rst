@@ -84,8 +84,11 @@ that same CPU environment. Transformer Engine and Apex are absent from this
 CPU environment. These results do not validate the locked CUDA runtime.
 
 The October 29 refresh passes 50 focused Core tests (one CUDA skip) and
-29 focused verl tests. The latter also pass after installing the generated CPU
-lock with Torch 2.13.0+cpu, Core 0.21.0 and Transformers 5.16.1. On H100,
+29 focused verl tests in the initial integration run. Expanded coverage after
+installing the final generated CPU lock passes 78 tests with one GPU-only skip
+on Torch 2.13.0+cpu, Core 0.21.0 and Transformers 5.16.1. Bridge forwarding
+passes 8 focused CPU tests against current Core and Transformers 5.16.1 in
+the existing CUDA image. On H100,
 8 router replay tests pass, including bit-exact CPU/CUDA route, score and
 gradient checks. That GPU run uses the existing Torch 2.11 / TE 2.15 image;
 it does not validate the new locked CUDA environment.

@@ -176,7 +176,7 @@ def apply_model_patches(models, *, mtp_enabled=False, detach_encoder=False, forw
     """Install only per-model MTP compatibility, without stacking replacements."""
     from verl.models.mcore import mtp_patch
 
-    for model in models if isinstance(models, (list, tuple)) else [models]:
+    for model in models if isinstance(models, list | tuple) else [models]:
         postprocess = mtp_enabled or (forward_only and mtp_num_layers == 0)
         install_patch(
             "mtp_postprocess",

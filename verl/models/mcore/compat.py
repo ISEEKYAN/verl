@@ -62,11 +62,6 @@ PATCHES = {
         ("https://github.com/verl-project/verl/pull/8338",),
         "Gradient and MoE memory parity pass; linked verl PR is not a Core fix",
     ),
-    "fused_forward": PatchInfo(
-        "Provider lacks native output callbacks",
-        ("https://github.com/verl-project/verl/pull/6933",),
-        "Provider forward exposes output_processor and output_processor_context",
-    ),
     "mtp_postprocess": PatchInfo(
         "RL MTP loss, output weight and normalization",
         ("https://github.com/NVIDIA/Megatron-LM/pull/8673",),
@@ -203,3 +198,45 @@ def configure_forward(model, model_config=None, *, engine_config=None):
     from verl.models.mcore.model_forward_fused import patch_fused_forward
 
     return patch_fused_forward(model, model_config, engine_config=engine_config)
+
+
+def has_output_processor(model):
+    """Check the complete callback contract, not a version string or **kwargs."""
+    import inspect
+
+    from verl.utils.megatron.native import get_language_model
+
+    parameters = inspect.signature(get_language_model(model).forward).parameters
+    return {"output_processor", "output_processor_context"}.issubset(parameters)
+
+
+def _readiness_api():
+    from megatron.core import utils
+
+    native = getattr(utils, "ensure_params_ready", None)
+    if native is not None:
+        return lambda weight: native([weight])
+    try:
+        from verl.utils.megatron.param_sync import ensure_fused_weight_ready
+    except ImportError:
+        return None
+    return ensure_fused_weight_ready
+
+
+def supports_fused_readiness(model):
+    """Old Core overlap needs existing verl PR #8029; native Core bypasses it."""
+    if _readiness_api() is not None:
+        return True
+    while True:
+        if getattr(getattr(model, "ddp_config", None), "overlap_param_gather", False):
+            return False
+        if not hasattr(model, "module"):
+            return True
+        model = model.module
+
+
+def ensure_output_weight_ready(weight):
+    """Use native readiness, or the helper from #8029 once it is available."""
+    ready = _readiness_api()
+    if ready is not None:
+        ready(weight)

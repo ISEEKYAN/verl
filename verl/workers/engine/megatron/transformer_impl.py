@@ -461,10 +461,9 @@ class MegatronEngine(BaseEngine):
         if not self.engine_config.use_fused_kernels:
             return
 
-        if not self.engine_config.use_remove_padding or self.is_value_model or self.model_config.mtp.enable:
+        if self.is_value_model or self.model_config.mtp.enable:
             logger.warning_once(
-                "Fused kernels require remove-padding and are not supported for value models or when MTP is enabled "
-                "in Megatron engine; disabling."
+                "Fused kernels are not supported for value models or when MTP is enabled in Megatron engine; disabling."
             )
             self.engine_config.use_fused_kernels = False
             return
@@ -472,7 +471,13 @@ class MegatronEngine(BaseEngine):
         from verl.models.mcore.compat import configure_forward
 
         for model in self.module:
-            configure_forward(model, self.model_config, engine_config=self.engine_config)
+            if not configure_forward(model, self.model_config, engine_config=self.engine_config):
+                logger.warning(
+                    "Fused output requires native callbacks and parameter readiness; using eager output. "
+                    "For old Core with parameter-gather overlap, see verl PR #8029."
+                )
+                self.engine_config.use_fused_kernels = False
+                return
 
     def _build_optimizer(self):
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
@@ -1308,6 +1313,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
                 cp_layout=cp_layout,
+                data_format="thd" if self.engine_config.use_remove_padding else "bshd",
+                forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
                 pad_to_length_bucket=pad_to_length_bucket,
